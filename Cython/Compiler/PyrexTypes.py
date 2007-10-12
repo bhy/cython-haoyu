@@ -5,21 +5,7 @@
 import string
 import Naming
 
-class BaseType:
-    #
-    #  Base class for all Pyrex types including pseudo-types.
-
-    def cast_code(self, expr_code):
-        return "((%s)%s)" % (self.declaration_code(""), expr_code)
-    
-    def base_declaration_code(self, base_code, entity_code):
-        if entity_code:
-            return "%s %s" % (base_code, entity_code)
-        else:
-            return base_code
-
-
-class PyrexType(BaseType):
+class PyrexType:
     #
     #  Base class for all Pyrex types.
     #
@@ -35,7 +21,6 @@ class PyrexType(BaseType):
     #  is_cfunction          boolean     Is a C function type
     #  is_struct_or_union    boolean     Is a C struct or union type
     #  is_enum               boolean     Is a C enum type
-    #  is_typedef            boolean     Is a typedef type
     #  is_string             boolean     Is a C char * type
     #  is_returncode         boolean     Is used only to signal exceptions
     #  is_error              boolean     Is the dummy error type
@@ -81,7 +66,6 @@ class PyrexType(BaseType):
     is_cfunction = 0
     is_struct_or_union = 0
     is_enum = 0
-    is_typedef = 0
     is_string = 0
     is_returncode = 0
     is_error = 0
@@ -106,7 +90,7 @@ class PyrexType(BaseType):
         return self.same_as_resolved_type(other_type.resolve(), **kwds)
     
     def same_as_resolved_type(self, other_type):
-        return self is other_type or other_type is error_type
+        return self == other_type or other_type is error_type
     
     def subtype_of(self, other_type):
         return self.subtype_of_resolved_type(other_type.resolve())
@@ -127,20 +111,17 @@ class PyrexType(BaseType):
         # A type is incomplete if it is an unsized array,
         # a struct whose attributes are not defined, etc.
         return 1
-
-
-class CTypedefType(BaseType):
-    #
-    #  Pseudo-type defined with a ctypedef statement in a
-    #  'cdef extern from' block. Delegates most attribute
-    #  lookups to the base type. ANYTHING NOT DEFINED
-    #  HERE IS DELEGATED!
-    #
-    #  qualified_name      string
-    #  typedef_cname       string
-    #  typedef_base_type   PyrexType
     
-    is_typedef = 1
+    def cast_code(self, expr_code):
+        return "((%s)%s)" % (self.declaration_code(""), expr_code)
+
+
+class CTypedefType:
+    #
+    #  Type defined with a ctypedef statement in a
+    #  'cdef extern from' block. Delegates most attribute
+    #  lookups to the base type.
+    #
     
     def __init__(self, cname, base_type):
         self.typedef_cname = cname
@@ -151,23 +132,10 @@ class CTypedefType(BaseType):
     
     def declaration_code(self, entity_code, 
             for_display = 0, dll_linkage = None, pyrex = 0):
-        name = self.declaration_name(for_display, pyrex)
-        return self.base_declaration_code(name, entity_code)
-    
-    def declaration_name(self, for_display = 0, pyrex = 0):
-        if pyrex or for_display:
-            return self.qualified_name
-        else:
-            return self.typedef_cname
-    
-    def as_argument_type(self):
-        return self
-
-    def __repr__(self):
-        return "<CTypedefType %s>" % self.typedef_cname
+        return "%s %s" % (self.typedef_cname, entity_code)
     
     def __str__(self):
-        return self.declaration_name(for_display = 1)
+        return self.typedef_cname
     
     def __getattr__(self, name):
         return getattr(self.typedef_base_type, name)
@@ -187,15 +155,15 @@ class PyObjectType(PyrexType):
         return "Python object"
     
     def __repr__(self):
-        return "<PyObjectType>"
+        return "PyObjectType"
     
     def assignable_from(self, src_type):
         return 1 # Conversion will be attempted
         
     def declaration_code(self, entity_code, 
             for_display = 0, dll_linkage = None, pyrex = 0):
-        if pyrex or for_display:
-            return self.base_declaration_code("object", entity_code)
+        if pyrex:
+            return "object %s" % entity_code
         else:
             return "%s *%s" % (public_decl("PyObject", dll_linkage), entity_code)
 
@@ -257,16 +225,19 @@ class PyExtensionType(PyObjectType):
         return self.typeobj_cname is None and self.module_name is not None
     
     def declaration_code(self, entity_code, 
-            for_display = 0, dll_linkage = None, pyrex = 0):
-        if pyrex or for_display:
-            return self.base_declaration_code(self.name, entity_code)
+            for_display = 0, dll_linkage = None, pyrex = 0, deref = 0):
+        if pyrex:
+            return "%s %s" % (self.name, entity_code)
         else:
             if self.typedef_flag:
                 base_format = "%s"
             else:
                 base_format = "struct %s"
             base = public_decl(base_format % self.objstruct_cname, dll_linkage)
-            return "%s *%s" % (base,  entity_code)
+            if deref:
+                return "%s %s" % (base,  entity_code)
+            else:
+                return "%s *%s" % (base,  entity_code)
 
     def attributes_known(self):
         return self.scope is not None
@@ -275,8 +246,8 @@ class PyExtensionType(PyObjectType):
         return self.name
     
     def __repr__(self):
-        return "<PyExtensionType %s%s>" % (self.scope.class_name,
-            ("", " typedef")[self.typedef_flag])
+        return "PyExtensionType(%s%s)" % (self.scope.class_name,
+            ("", ".typedef_flag=1")[self.typedef_flag])
     
 
 class CType(PyrexType):
@@ -289,6 +260,15 @@ class CType(PyrexType):
     
     to_py_function = None
     from_py_function = None
+    exception_value = None
+    exception_check = 1
+
+
+#class CSimpleType(CType):
+#	#
+#	#  Base class for all unstructured C types.
+#	#
+#	pass
 
 
 class CVoidType(CType):
@@ -300,7 +280,7 @@ class CVoidType(CType):
     def declaration_code(self, entity_code, 
             for_display = 0, dll_linkage = None, pyrex = 0):
         base = public_decl("void", dll_linkage)
-        return self.base_declaration_code(base, entity_code)
+        return "%s %s" % (base, entity_code)
     
     def is_complete(self):
         return 0
@@ -311,19 +291,16 @@ class CNumericType(CType):
     #   Base class for all C numeric types.
     #
     #   rank      integer     Relative size
-    #   signed    integer     0 = unsigned, 1 = unspecified, 2 = explicitly signed
+    #   signed    boolean
     #
     
     is_numeric = 1
     default_value = "0"
     
     parsetuple_formats = ( # rank -> format
-        "BHIkK????", # unsigned
-        "bhilL?fd?", # assumed signed
-        "bhilL?fd?", # explicitly signed
+        "?HIkKn???", # unsigned
+        "chilLnfd?", # signed
     )
-    
-    sign_words = ("unsigned ", "", "signed ")
     
     def __init__(self, rank, signed = 1, pymemberdef_typecode = None):
         self.rank = rank
@@ -334,18 +311,21 @@ class CNumericType(CType):
         self.parsetuple_format = ptf
         self.pymemberdef_typecode = pymemberdef_typecode
     
-    def sign_and_name(self):
-        s = self.sign_words[self.signed]
-        n = rank_to_type_name[self.rank]
-        return s + n
-    
     def __repr__(self):
-        return "<CNumericType %s>" % self.sign_and_name()
+        if self.signed:
+            u = ""
+        else:
+            u = "unsigned "
+        return "<CNumericType %s%s>" % (u, rank_to_type_name[self.rank])
     
     def declaration_code(self, entity_code, 
             for_display = 0, dll_linkage = None, pyrex = 0):
-        base = public_decl(self.sign_and_name(), dll_linkage)
-        return self.base_declaration_code(base,  entity_code)
+        if self.signed:
+            u = ""
+        else:
+            u = "unsigned "
+        base = public_decl(u + rank_to_type_name[self.rank], dll_linkage)
+        return "%s %s" % (base,  entity_code)
     
 
 class CIntType(CNumericType):
@@ -354,6 +334,7 @@ class CIntType(CNumericType):
     typedef_flag = 0
     to_py_function = "PyInt_FromLong"
     from_py_function = "PyInt_AsLong"
+    exception_value = -1
 
     def __init__(self, rank, signed, pymemberdef_typecode = None, is_returncode = 0):
         CNumericType.__init__(self, rank, signed, pymemberdef_typecode)
@@ -361,41 +342,46 @@ class CIntType(CNumericType):
     
     def assignable_from_resolved_type(self, src_type):
         return src_type.is_int or src_type.is_enum or src_type is error_type
+        
 
+class CBIntType(CIntType):
 
-class CAnonEnumType(CIntType):
+    # TODO: this should be a macro "(__ ? Py_True : Py_False)"
+    #       and no error checking should be needed (just an incref). 
+    to_py_function = "__Pyx_PyBool_FromLong"
+    from_py_function = "__Pyx_PyObject_IsTrue"
+    exception_check = 0
+    
 
-    is_enum = 1	
+class CPySSizeTType(CIntType):
 
+    to_py_function = "PyInt_FromSsize_t"
+    from_py_function = "__pyx_PyIndex_AsSsize_t"
+    exception_value = None
 
 class CUIntType(CIntType):
 
     to_py_function = "PyLong_FromUnsignedLong"
     from_py_function = "PyInt_AsUnsignedLongMask"
+    exception_value = None
 
 
-class CULongType(CIntType):
+class CULongType(CUIntType):
 
     to_py_function = "PyLong_FromUnsignedLong"
     from_py_function = "PyInt_AsUnsignedLongMask"
 
 
-class CLongLongType(CIntType):
+class CLongLongType(CUIntType):
 
     to_py_function = "PyLong_FromLongLong"
     from_py_function = "PyInt_AsUnsignedLongLongMask"
 
 
-class CULongLongType(CIntType):
+class CULongLongType(CUIntType):
 
     to_py_function = "PyLong_FromUnsignedLongLong"
     from_py_function = "PyInt_AsUnsignedLongLongMask"
-
-
-class CPySSizeTType(CIntType):
-
-    to_py_function = "PyInt_FromSsize_t"
-    from_py_function = "PyInt_AsSsize_t"
 
 
 class CFloatType(CNumericType):
@@ -424,7 +410,7 @@ class CArrayType(CType):
             self.is_string = 1
     
     def __repr__(self):
-        return "<CArrayType %s %s>" % (self.size, repr(self.base_type))
+        return "CArrayType(%s,%s)" % (self.size, repr(self.base_type))
     
     def same_as_resolved_type(self, other_type):
         return ((other_type.is_array and
@@ -444,10 +430,8 @@ class CArrayType(CType):
             dimension_code = self.size
         else:
             dimension_code = ""
-        if entity_code.startswith("*"):
-            entity_code = "(%s)" % entity_code
         return self.base_type.declaration_code(
-            "%s[%s]" % (entity_code, dimension_code),
+            "(%s[%s])" % (entity_code, dimension_code),
             for_display, dll_linkage, pyrex)
     
     def as_argument_type(self):
@@ -461,13 +445,13 @@ class CPtrType(CType):
     #  base_type     CType    Referenced type
     
     is_ptr = 1
-    default_value = "0"
+    default_value = 0
     
     def __init__(self, base_type):
         self.base_type = base_type
     
     def __repr__(self):
-        return "<CPtrType %s>" % repr(self.base_type)
+        return "CPtrType(%s)" % repr(self.base_type)
     
     def same_as_resolved_type(self, other_type):
         return ((other_type.is_ptr and
@@ -478,20 +462,24 @@ class CPtrType(CType):
             for_display = 0, dll_linkage = None, pyrex = 0):
         #print "CPtrType.declaration_code: pointer to", self.base_type ###
         return self.base_type.declaration_code(
-            "*%s" % entity_code,
+            "(*%s)" % entity_code,
             for_display, dll_linkage, pyrex)
     
     def assignable_from_resolved_type(self, other_type):
         if other_type is error_type:
             return 1
-        elif other_type.is_null_ptr:
-            return 1
         elif self.base_type.is_cfunction and other_type.is_cfunction:
             return self.base_type.same_as(other_type)
-        elif other_type.is_array or other_type.is_ptr:
-            return self.base_type.is_void or self.base_type.same_as(other_type.base_type)
-        else:
+        elif other_type.is_array:
+            return self.base_type.same_as(other_type.base_type)
+        elif not other_type.is_ptr:
             return 0
+        elif self.base_type.is_void:
+            return 1
+        elif other_type.is_null_ptr:
+            return 1
+        else:
+            return self.base_type.same_as(other_type.base_type)
 
 
 class CNullPtrType(CPtrType):
@@ -504,48 +492,33 @@ class CFuncType(CType):
     #  args             [CFuncTypeArg]
     #  has_varargs      boolean
     #  exception_value  string
-    #  exception_check  boolean    True if PyErr_Occurred check needed
-    #  calling_convention  string  Function calling convention
-    #  nogil            boolean    Can be called without gil
-    #  with_gil         boolean    Acquire gil around function body
+    #  exception_check  boolean  True if PyErr_Occurred check needed
+    #  with_gil         boolean  True if GIL should be grabbed/released
     
     is_cfunction = 1
     
-    def __init__(self, return_type, args, has_varargs = 0,
-            exception_value = None, exception_check = 0, calling_convention = "",
-            nogil = 0, with_gil = 0):
+    def __init__(self, return_type, args, has_varargs,
+            exception_value = None, exception_check = 0, with_gil = False):
         self.return_type = return_type
         self.args = args
         self.has_varargs = has_varargs
         self.exception_value = exception_value
         self.exception_check = exception_check
-        self.calling_convention = calling_convention
-        self.nogil = nogil
         self.with_gil = with_gil
     
     def __repr__(self):
         arg_reprs = map(repr, self.args)
         if self.has_varargs:
             arg_reprs.append("...")
-        return "<CFuncType %s %s[%s]>" % (
+        return "CFuncType(%s,[%s])" % (
             repr(self.return_type),
-            self.calling_convention_prefix(),
             string.join(arg_reprs, ","))
-    
-    def calling_convention_prefix(self):
-        cc = self.calling_convention
-        if cc:
-            return cc + " "
-        else:
-            return ""
     
     def same_c_signature_as(self, other_type, as_cmethod = 0):
         return self.same_c_signature_as_resolved_type(
             other_type.resolve(), as_cmethod)
 
     def same_c_signature_as_resolved_type(self, other_type, as_cmethod):
-        #print "CFuncType.same_c_signature_as_resolved_type:", \
-        #	self, other_type, "as_cmethod =", as_cmethod ###
         if other_type is error_type:
             return 1
         if not other_type.is_cfunction:
@@ -564,14 +537,31 @@ class CFuncType(CType):
             return 0
         if not self.return_type.same_as(other_type.return_type):
             return 0
-        if not self.same_calling_convention_as(other_type):
+        return 1
+        
+    def narrower_c_signature_than(self, other_type, as_cmethod = 0):
+        return self.narrower_c_signature_than_resolved_type(other_type.resolve(), as_cmethod)
+        
+    def narrower_c_signature_than_resolved_type(self, other_type, as_cmethod):
+        if other_type is error_type:
+            return 1
+        if not other_type.is_cfunction:
+            return 0
+        nargs = len(self.args)
+        if nargs <> len(other_type.args):
+            return 0
+        for i in range(as_cmethod, nargs):
+            if not self.args[i].type.subtype_of_resolved_type(other_type.args[i].type):
+                return 0
+            else:
+                self.args[i].needs_type_test = other_type.args[i].needs_type_test \
+                        or not self.args[i].type.same_as(other_type.args[i].type)
+        if self.has_varargs <> other_type.has_varargs:
+            return 0
+        if not self.return_type.subtype_of_resolved_type(other_type.return_type):
             return 0
         return 1
-    
-    def same_calling_convention_as(self, other):
-        sc1 = self.calling_convention == '__stdcall'
-        sc2 = other.calling_convention == '__stdcall'
-        return sc1 == sc2
+
     
     def same_exception_signature_as(self, other_type):
         return self.same_exception_signature_as_resolved_type(
@@ -597,24 +587,20 @@ class CFuncType(CType):
         if not arg_decl_code and not pyrex:
             arg_decl_code = "void"
         exc_clause = ""
-        if (pyrex or for_display) and not self.return_type.is_pyobject:
+        with_gil_clause = ""
+        if pyrex or for_display:
             if self.exception_value and self.exception_check:
                 exc_clause = " except? %s" % self.exception_value
             elif self.exception_value:
                 exc_clause = " except %s" % self.exception_value
             elif self.exception_check:
                 exc_clause = " except *"
-        cc = self.calling_convention_prefix()
-        if (not entity_code and cc) or entity_code.startswith("*"):
-            entity_code = "(%s%s)" % (cc, entity_code)
-            cc = ""
+            if self.with_gil:
+                with_gil_clause = " with GIL"
         return self.return_type.declaration_code(
-            "%s%s(%s)%s" % (cc, entity_code, arg_decl_code, exc_clause),
+            "(%s(%s)%s%s)" % (entity_code, arg_decl_code,
+                              exc_clause, with_gil_clause),
             for_display, dll_linkage, pyrex)
-
-    def signature_string(self):
-        s = self.declaration_code("")
-        return s
 
 
 class CFuncTypeArg:
@@ -628,6 +614,8 @@ class CFuncTypeArg:
         self.cname = Naming.var_prefix + name
         self.type = type
         self.pos = pos
+        self.not_none = False
+        self.needs_type_test = False # TODO: should these defaults be set in analyse_types()?
     
     def __repr__(self):
         return "%s:%s" % (self.name, repr(self.type))
@@ -654,13 +642,13 @@ class CStructOrUnionType(CType):
         self.typedef_flag = typedef_flag
         
     def __repr__(self):
-        return "<CStructOrUnionType %s %s%s>" % (self.name, self.cname,
-            ("", " typedef")[self.typedef_flag])
+        return "CStructOrUnionType(%s,%s%s)" % (self.name, self.cname,
+            ("", ",typedef_flag=1")[self.typedef_flag])
 
     def declaration_code(self, entity_code, 
             for_display = 0, dll_linkage = None, pyrex = 0):
         if pyrex:
-            return self.base_declaration_code(self.name, entity_code)
+            return "%s %s" % (self.name, entity_code)
         else:
             if for_display:
                 base = self.name
@@ -668,7 +656,16 @@ class CStructOrUnionType(CType):
                 base = self.cname
             else:
                 base = "%s %s" % (self.kind, self.cname)
-            return self.base_declaration_code(public_decl(base, dll_linkage), entity_code)
+            return "%s %s" % (public_decl(base, dll_linkage), entity_code)
+
+    def __cmp__(self, other):
+        try:
+            if self.name == other.name:
+                return 0
+            else:
+                return 1
+        except AttributeError:
+            return 1
 
     def is_complete(self):
         return self.scope is not None
@@ -683,8 +680,8 @@ class CEnumType(CType):
     #  typedef_flag   boolean
     
     is_enum = 1
-    signed = 1
-    rank = -1 # Ranks below any integer type
+    #signed = 1
+    #rank = 2
     to_py_function = "PyInt_FromLong"
     from_py_function = "PyInt_AsLong"
 
@@ -694,23 +691,20 @@ class CEnumType(CType):
         self.values = []
         self.typedef_flag = typedef_flag
     
-    def __str__(self):
-        return self.name
-    
     def __repr__(self):
-        return "<CEnumType %s %s%s>" % (self.name, self.cname,
-            ("", " typedef")[self.typedef_flag])
+        return "CEnumType(%s,%s%s)" % (self.name, self.cname,
+            ("", ",typedef_flag=1")[self.typedef_flag])
     
     def declaration_code(self, entity_code, 
             for_display = 0, dll_linkage = None, pyrex = 0):
         if pyrex:
-            return self.base_declaration_code(self.cname, entity_code)
+            return "%s %s" % (self.cname, entity_code)
         else:
             if self.typedef_flag:
                 base = self.cname
             else:
                 base = "enum %s" % self.cname
-            return self.base_declaration_code(public_decl(base, dll_linkage), entity_code)
+            return "%s %s" % (public_decl(base, dll_linkage), entity_code)
 
 
 class CStringType:
@@ -720,8 +714,11 @@ class CStringType:
     
     to_py_function = "PyString_FromString"
     from_py_function = "PyString_AsString"
+    exception_value = "NULL"
 
     def literal_code(self, value):
+        if isinstance(value, unicode):
+            value = value.encode("UTF-8")
         return '"%s"' % value
 
 
@@ -768,28 +765,23 @@ c_void_type =         CVoidType()
 c_void_ptr_type =     CPtrType(c_void_type)
 c_void_ptr_ptr_type = CPtrType(c_void_ptr_type)
 
-c_uchar_type =       CIntType(0, 0, "T_UBYTE")
-c_ushort_type =      CIntType(1, 0, "T_USHORT")
-c_uint_type =        CUIntType(2, 0, "T_UINT")
-c_ulong_type =       CULongType(3, 0, "T_ULONG")
-c_ulonglong_type =   CULongLongType(4, 0, "T_ULONGLONG")
+c_char_type =     CIntType(0, 1, "T_CHAR")
+c_short_type =    CIntType(1, 1, "T_SHORT")
+c_int_type =      CIntType(2, 1, "T_INT")
+c_long_type =     CIntType(3, 1, "T_LONG")
+c_longlong_type = CLongLongType(4, 1, "T_LONGLONG")
+c_py_ssize_t_type = CPySSizeTType(5, 1)
+c_bint_type =      CBIntType(2, 1, "T_INT")
 
-c_char_type =        CIntType(0, 1, "T_CHAR")
-c_short_type =       CIntType(1, 1, "T_SHORT")
-c_int_type =         CIntType(2, 1, "T_INT")
-c_long_type =        CIntType(3, 1, "T_LONG")
-c_longlong_type =    CLongLongType(4, 1, "T_LONGLONG")
-c_py_ssize_t_type =  CPySSizeTType(5, 1)
+c_uchar_type =     CIntType(0, 0, "T_UBYTE")
+c_ushort_type =    CIntType(1, 0, "T_USHORT")
+c_uint_type =      CUIntType(2, 0, "T_UINT")
+c_ulong_type =     CULongType(3, 0, "T_ULONG")
+c_ulonglong_type = CULongLongType(4, 0, "T_ULONGLONG")
 
-c_schar_type =       CIntType(0, 2, "T_CHAR")
-c_sshort_type =      CIntType(1, 2, "T_SHORT")
-c_sint_type =        CIntType(2, 2, "T_INT")
-c_slong_type =       CIntType(3, 2, "T_LONG")
-c_slonglong_type =   CLongLongType(4, 2, "T_LONGLONG")
-
-c_float_type =       CFloatType(6, "T_FLOAT")
-c_double_type =      CFloatType(7, "T_DOUBLE")
-c_longdouble_type =  CFloatType(8)
+c_float_type =      CFloatType(6, "T_FLOAT")
+c_double_type =     CFloatType(7, "T_DOUBLE")
+c_longdouble_type = CFloatType(8)
 
 c_null_ptr_type =     CNullPtrType(c_void_type)
 c_char_array_type =   CCharArrayType(None)
@@ -798,8 +790,6 @@ c_char_ptr_ptr_type = CPtrType(c_char_ptr_type)
 c_int_ptr_type =      CPtrType(c_int_type)
 
 c_returncode_type =   CIntType(2, 1, "T_INT", is_returncode = 1)
-
-c_anon_enum_type =    CAnonEnumType(-1, 1)
 
 error_type =    ErrorType()
 
@@ -824,18 +814,13 @@ sign_and_rank_to_type = {
     (0, 2): c_uint_type, 
   (0, 3): c_ulong_type,
   (0, 4): c_ulonglong_type,
+    (0, 5):  c_ulonglong_type,            # I'm not sure about this.  this should be for size_t Py_ssize_t
     (1, 0): c_char_type, 
     (1, 1): c_short_type, 
     (1, 2): c_int_type, 
     (1, 3): c_long_type,
     (1, 4): c_longlong_type,
     (1, 5): c_py_ssize_t_type,
-    (2, 0): c_schar_type, 
-    (2, 1): c_sshort_type, 
-    (2, 2): c_sint_type, 
-    (2, 3): c_slong_type,
-    (2, 4): c_slonglong_type,
-    (2, 5): c_py_ssize_t_type,
     (1, 6): c_float_type, 
     (1, 7): c_double_type,
     (1, 8): c_longdouble_type,
@@ -846,8 +831,8 @@ modifiers_and_name_to_type = {
     (0, 0, "char"): c_uchar_type, 
     (0, -1, "int"): c_ushort_type, 
     (0, 0, "int"): c_uint_type, 
-  (0, 1, "int"): c_ulong_type,
-  (0, 2, "int"): c_ulonglong_type,
+    (0, 1, "int"): c_ulong_type,
+    (0, 2, "int"): c_ulonglong_type,
     (1, 0, "void"): c_void_type,
     (1, 0, "char"): c_char_type, 
     (1, -1, "int"): c_short_type, 
@@ -859,24 +844,18 @@ modifiers_and_name_to_type = {
     (1, 0, "double"): c_double_type,
     (1, 1, "double"): c_longdouble_type,
     (1, 0, "object"): py_object_type,
-    (2, 0, "char"): c_schar_type, 
-    (2, -1, "int"): c_sshort_type, 
-    (2, 0, "int"): c_sint_type, 
-    (2, 1, "int"): c_slong_type,
-    (2, 2, "int"): c_slonglong_type,
-    (2, 0, "Py_ssize_t"): c_py_ssize_t_type,
+
+    (1, 0, "bint"): c_bint_type, 
 }
 
 def widest_numeric_type(type1, type2):
     # Given two numeric types, return the narrowest type
     # encompassing both of them.
-    if type1.is_enum and type2.is_enum:
-        widest_type = c_int_type
-    elif type2.rank > type1.rank:
-        widest_type = type2
-    else:
-        widest_type = type1
-    return widest_type
+    signed = type1.signed
+    rank = max(type1.rank, type2.rank)
+    if rank >= lowest_float_rank:
+        signed = 1
+    return sign_and_rank_to_type[signed, rank]
 
 def simple_c_type(signed, longness, name):
     # Find type descriptor for simple type given name and modifiers.

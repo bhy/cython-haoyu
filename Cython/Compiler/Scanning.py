@@ -6,14 +6,13 @@
 import cPickle as pickle
 
 import os
-import platform
 import stat
 import sys
 from time import time
 
-from Pyrex import Plex
-from Pyrex.Plex import Scanner
-from Pyrex.Plex.Errors import UnrecognizedInput
+from Cython import Plex
+from Cython.Plex import Scanner
+from Cython.Plex.Errors import UnrecognizedInput
 from Errors import CompileError, error
 from Lexicon import string_prefixes, make_lexicon
 
@@ -139,7 +138,11 @@ reserved_words = [
     "raise", "import", "exec", "try", "except", "finally",
     "while", "if", "elif", "else", "for", "in", "assert",
     "and", "or", "not", "is", "in", "lambda", "from",
-    "NULL", "cimport", "with", "DEF", "IF", "ELIF", "ELSE"
+    "NULL", "cimport", "by", "with"
+]
+
+function_contexts = [ # allowed arguments to the "with" option
+    "GIL"
 ]
 
 class Method:
@@ -161,53 +164,7 @@ def build_resword_dict():
 
 #------------------------------------------------------------------
 
-class CompileTimeScope(object):
-
-    def __init__(self, outer = None):
-        self.entries = {}
-        self.outer = outer
-    
-    def declare(self, name, value):
-        self.entries[name] = value
-    
-    def lookup_here(self, name):
-        return self.entries[name]
-    
-    def lookup(self, name):
-        try:
-            return self.lookup_here(name)
-        except KeyError:
-            outer = self.outer
-            if outer:
-                return outer.lookup(name)
-            else:
-                raise
-
-def initial_compile_time_env():
-    benv = CompileTimeScope()
-    names = ('UNAME_SYSNAME', 'UNAME_NODENAME', 'UNAME_RELEASE',
-        'UNAME_VERSION', 'UNAME_MACHINE')
-    for name, value in zip(names, platform.uname()):
-        benv.declare(name, value)
-    import __builtin__
-    names = ('False', 'True',
-        'abs', 'bool', 'chr', 'cmp', 'complex', 'dict', 'divmod', 'enumerate',
-        'float', 'hash', 'hex', 'int', 'len', 'list', 'long', 'map', 'max', 'min',
-        'oct', 'ord', 'pow', 'range', 'reduce', 'repr', 'round', 'slice', 'str',
-        'sum', 'tuple', 'xrange', 'zip')
-    for name in names:
-        benv.declare(name, getattr(__builtin__, name))
-    denv = CompileTimeScope(benv)
-    return denv
-
-#------------------------------------------------------------------
-
 class PyrexScanner(Scanner):
-    #  context            Context  Compilation context
-    #  type_names         set      Identifiers to be treated as type names
-    #  compile_time_env   dict     Environment for conditional compilation
-    #  compile_time_eval  boolean  In a true conditional compilation context
-    #  compile_time_expr  boolean  In a compile-time expression context
     
     resword_dict = build_resword_dict()
 
@@ -217,15 +174,9 @@ class PyrexScanner(Scanner):
         if parent_scanner:
             self.context = parent_scanner.context
             self.type_names = parent_scanner.type_names
-            self.compile_time_env = parent_scanner.compile_time_env
-            self.compile_time_eval = parent_scanner.compile_time_eval
-            self.compile_time_expr = parent_scanner.compile_time_expr
         else:
             self.context = context
             self.type_names = type_names
-            self.compile_time_env = initial_compile_time_env()
-            self.compile_time_eval = 1
-            self.compile_time_expr = 0
         self.trace = trace_scanner
         self.indentation_stack = [0]
         self.indentation_char = None
@@ -356,19 +307,10 @@ class PyrexScanner(Scanner):
         if self.sy == what:
             self.next()
         else:
-            self.expected(what, message)
-    
-    def expect_keyword(self, what, message = None):
-        if self.sy == 'IDENT' and self.systring == what:
-            self.next()
-        else:
-            self.expected(what, message)
-    
-    def expected(self, what, message):
-        if message:
-            self.error(message)
-        else:
-            self.error("Expected '%s'" % what)
+            if message:
+                self.error(message)
+            else:
+                self.error("Expected '%s'" % what)
         
     def expect_indent(self):
         self.expect('INDENT',
@@ -378,7 +320,7 @@ class PyrexScanner(Scanner):
         self.expect('DEDENT',
             "Expected a decrease in indentation level")
 
-    def expect_newline(self, message = "Expected a newline"):
+    def expect_newline(self, message):
         # Expect either a newline or end of file
         if self.sy <> 'EOF':
             self.expect('NEWLINE', message)

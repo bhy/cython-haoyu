@@ -8,6 +8,7 @@
 
 pyrex_prefix    = "__pyx_"
 
+builtin_prefix    = pyrex_prefix + "builtin_"
 arg_prefix        = pyrex_prefix + "arg_"
 funcdoc_prefix    = pyrex_prefix + "doc_"
 enum_prefix       = pyrex_prefix + "e_"
@@ -34,6 +35,7 @@ args_cname       = pyrex_prefix + "args"
 kwdlist_cname    = pyrex_prefix + "argnames"
 obj_base_cname   = pyrex_prefix + "base"
 builtins_cname   = pyrex_prefix + "b"
+preimport_cname  = pyrex_prefix + "i"
 moddict_cname    = pyrex_prefix + "d"
 dummy_cname      = pyrex_prefix + "dummy"
 filename_cname   = pyrex_prefix + "filename"
@@ -47,20 +49,10 @@ module_cname     = pyrex_prefix + "m"
 moddoc_cname     = pyrex_prefix + "mdoc"
 methtable_cname  = pyrex_prefix + "methods"
 retval_cname     = pyrex_prefix + "r"
-reqd_kwds_cname  = pyrex_prefix + "reqd_kwds"
 self_cname       = pyrex_prefix + "self"
 stringtab_cname  = pyrex_prefix + "string_tab"
 vtabslot_cname   = pyrex_prefix + "vtab"
+c_api_tab_cname  = pyrex_prefix + "c_api_tab"
+gilstate_cname   = pyrex_prefix + "state"
 
 extern_c_macro  = pyrex_prefix.upper() + "EXTERN_C"
-
-exc_type_name   = pyrex_prefix + "exc_type"
-exc_value_name  = pyrex_prefix + "exc_value"
-exc_tb_name     = pyrex_prefix + "exc_tb"
-exc_lineno_name = pyrex_prefix + "exc_lineno"
-
-exc_vars = (exc_type_name, exc_value_name, exc_tb_name)
-
-h_guard_prefix   = "__PYX_HAVE__"
-api_guard_prefix = "__PYX_HAVE_API__"
-api_func_guard   = "__PYX_HAVE_API_FUNC_"

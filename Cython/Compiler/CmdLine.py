@@ -1,28 +1,42 @@
 #
-#   Pyrex - Command Line Parsing
+#   Cython - Command Line Parsing
 #
 
 import sys
+import Options
 
 usage = """\
-Usage: pyrexc [options] sourcefile...
+Cython (http://cython.org) is a compiler for code written in the
+Cython language.  Cython is based on Pyrex by Greg Ewing.
+
+Usage: cython [options] sourcefile.pyx ...
+
 Options:
-  -v, --version                  Display version number of pyrex compiler
+  -v, --version                  Display version number of cython compiler
   -l, --create-listing           Write error messages to a listing file
   -I, --include-dir <directory>  Search for include files in named directory
+                                 (multiply include directories are allowed).
   -o, --output-file <filename>   Specify name of generated C file
-The following experimental options are supported only on MacOSX:
-  -C, --compile    Compile generated .c file to .o file
-  -X, --link       Link .o file to produce extension module (implies -C)
-  -+, --cplus      Use C++ compiler for compiling and linking
-  Additional .o files to link may be supplied when using -X."""
+  -p, --embed-positions          If specified, the positions in Cython files of each
+                                 function definition is embedded in its docstring.
+  -z, --pre-import <module>      If specified, assume undeclared names in this 
+                                 module. Emulates the behavior of putting 
+                                 "from <module> import *" at the top of the file. 
+  --incref-local-binop           Force local an extra incref on local variables before
+                                 performing any binary operations. 
+"""  
+#The following experimental options are supported only on MacOSX:
+#  -C, --compile    Compile generated .c file to .o file
+#  -X, --link       Link .o file to produce extension module (implies -C)
+#  -+, --cplus      Use C++ compiler for compiling and linking
+#  Additional .o files to link may be supplied when using -X."""
 
 def bad_usage():
     print >>sys.stderr, usage
     sys.exit(1)
 
 def parse_command_line(args):
-    from Pyrex.Compiler.Main import \
+    from Cython.Compiler.Main import \
         CompilationOptions, default_options
 
     def pop_arg():
@@ -60,6 +74,12 @@ def parse_command_line(args):
                 options.include_path.append(pop_arg())
             elif option in ("-o", "--output-file"):
                 options.output_file = pop_arg()
+            elif option in ("-p", "--embed-positions"):
+                Options.embed_pos_in_docstring = 1
+            elif option in ("-z", "--pre-import"):
+                Options.pre_import = pop_arg()
+            elif option == "--incref-local-binop":
+                Options.incref_local_binop = 1
             else:
                 bad_usage()
         else:
@@ -70,13 +90,15 @@ def parse_command_line(args):
                 options.objects.append(arg)
             else:
                 print >>sys.stderr, \
-                    "pyrexc: %s: Unknown filename suffix" % arg
+                    "cython: %s: Unknown filename suffix" % arg
     if options.objects and len(sources) > 1:
         print >>sys.stderr, \
-            "pyrexc: Only one source file allowed together with .o files"
+            "cython: Only one source file allowed together with .o files"
     if options.use_listing_file and len(sources) > 1:
         print >>sys.stderr, \
-            "pyrexc: Only one source file allowed when using -o"
+            "cython: Only one source file allowed when using -o"
         sys.exit(1)
+    if len(sources) == 0:
+        bad_usage()
     return options, sources
 

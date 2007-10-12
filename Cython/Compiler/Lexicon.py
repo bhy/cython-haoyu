@@ -5,10 +5,10 @@
 #   to be rebuilt next time pyrexc is run.
 #
 
-string_prefixes = "cCrR"
+string_prefixes = "cCrRuU"
 
 def make_lexicon():
-    from Pyrex.Plex import \
+    from Cython.Plex import \
         Str, Any, AnyBut, AnyChar, Rep, Rep1, Opt, Bol, Eol, Eof, \
         TEXT, IGNORE, State, Lexicon
     from Scanning import Method
@@ -66,7 +66,7 @@ def make_lexicon():
     bra = Any("([{")
     ket = Any(")]}")
     punct = Any(":,;+-*/|&<>=.%`~^?")
-    diphthong = Str("==", "<>", "!=", "<=", ">=", "<<", ">>", "**")
+    diphthong = Str("==", "<>", "!=", "<=", ">=", "<<", ">>", "**", "+=", "-=", "*=", "/=", "%=", "|=", "^=", "&=", "//")
     spaces = Rep1(Any(" \t\f"))
     comment = Str("#") + Rep(AnyBut("\n"))
     escaped_newline = Str("\\\n")

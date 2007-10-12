@@ -3,14 +3,36 @@
 #
 
 import sys
-from Pyrex.Utils import open_new_file
+from Cython.Utils import open_new_file
 
 
 class PyrexError(Exception):
     pass
 
+class PyrexWarning(Exception):
+    pass
+
+def context(position):
+    F = open(position[0]).readlines()
+    s = ''.join(F[position[1]-6:position[1]])
+    s += ' '*(position[2]-1) + '^'
+    s = '-'*60 + '\n...\n' + s + '\n' + '-'*60 + '\n'
+    return s
 
 class CompileError(PyrexError):
+    
+    def __init__(self, position = None, message = ""):
+        self.position = position
+        self.message = message
+        if position:
+            pos_str = "%s:%d:%d: " % position
+            cont = context(position)
+        else:
+            pos_str = ""
+            cont = ''
+        Exception.__init__(self, '\nError converting Pyrex file to C:\n' + cont + '\n' + pos_str + message )
+
+class CompileWarning(PyrexWarning):
     
     def __init__(self, position = None, message = ""):
         self.position = position
@@ -54,19 +76,27 @@ def close_listing_file():
         listing_file.close()
         listing_file = None
 
-def report(position, message):
+def error(position, message):
+    #print "Errors.error:", repr(position), repr(message) ###
+    global num_errors
     err = CompileError(position, message)
     line = "%s\n" % err
     if listing_file:
         listing_file.write(line)
     if echo_file:
         echo_file.write(line)
+    num_errors = num_errors + 1
     return err
 
-def warning(position, message):
-    return report(position, "Warning: %s" % message)
+LEVEL=1 # warn about all errors level 1 or higher
 
-def error(position, message):
-    global num_errors
-    num_errors = num_errors + 1
-    return report(position, message)
+def warning(position, message, level):
+    if level < LEVEL:
+        return
+    warn = CompileWarning(position, message)
+    line = "warning: %s\n" % warn
+    if listing_file:
+        listing_file.write(line)
+    if echo_file:
+        echo_file.write(line)
+    return warn

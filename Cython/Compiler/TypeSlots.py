@@ -82,19 +82,20 @@ class Signature:
     
     def return_type(self):
         return self.format_map[self.ret_format]
-    
-    def exception_value(self):
-        return self.error_value_map.get(self.ret_format)
-    
-    def function_type(self):
-        #  Construct a C function type descriptor for this signature
-        args = []
-        for i in xrange(self.num_fixed_args()):
-            arg_type = self.fixed_arg_type(i)
-            args.append(PyrexTypes.CFuncTypeArg("", arg_type, None))
-        ret_type = self.return_type()
-        exc_value = self.exception_value()
-        return PyrexTypes.CFuncType(ret_type, args, exception_value = exc_value)
+        
+    def method_flags(self):
+        if self.ret_format == "O":
+            full_args = self.fixed_arg_format
+            if self.has_dummy_arg:
+                full_args = "O" + full_args
+            if full_args in ["O", "T"]:
+                if self.has_generic_args:
+                    return [method_varargs, method_keywords]
+                else:
+                    return [method_noargs]
+            elif full_args in ["OO", "TO"] and not self.has_generic_args:
+                return [method_onearg]
+        return None
 
 
 class SlotDescriptor:
@@ -102,25 +103,24 @@ class SlotDescriptor:
     #
     #  slot_name    string           Member name of the slot in the type object
     #  is_initialised_dynamically    Is initialised by code in the module init function
-    #  flag                          Py_TPFLAGS_XXX value indicating presence of slot
-    
-    def __init__(self, slot_name, dynamic = 0, flag = None):
+
+    def __init__(self, slot_name, dynamic = 0, min_python_version = None):
         self.slot_name = slot_name
         self.is_initialised_dynamically = dynamic
-        self.flag = flag
-    
+        self.min_python_version = min_python_version
+
     def generate(self, scope, code):
         if self.is_initialised_dynamically:
             value = 0
         else:
             value = self.slot_code(scope)
-        flag = self.flag
-        if flag:
-            code.putln("#if Py_TPFLAGS_DEFAULT & %s" % flag)
+        if self.min_python_version is not None:
+            code.putln("#if PY_VERSION_HEX >= " +
+                       code.get_py_version_hex(self.min_python_version))
         code.putln("%s, /*%s*/" % (value, self.slot_name))
-        if flag:
+        if self.min_python_version is not None:
             code.putln("#endif")
-    
+
     # Some C implementations have trouble statically 
     # initialising a global with a pointer to an extern 
     # function, so we initialise some of the type slots
@@ -181,8 +181,10 @@ class MethodSlot(SlotDescriptor):
     #  method_name  string           The __xxx__ name of the method
     #  default      string or None   Default value of the slot
     
-    def __init__(self, signature, slot_name, method_name, default = None, flag = None):
-        SlotDescriptor.__init__(self, slot_name, flag = flag)
+    def __init__(self, signature, slot_name, method_name,
+                 default = None, min_python_version = None):
+        SlotDescriptor.__init__(self, slot_name,
+                                min_python_version = min_python_version)
         self.signature = signature
         self.slot_name = slot_name
         self.method_name = method_name
@@ -199,7 +201,7 @@ class MethodSlot(SlotDescriptor):
 
 class InternalMethodSlot(SlotDescriptor):
     #  Type slot descriptor for a method which is always
-    #  synthesized by Pyrex.
+    #  synthesized by Cython.
     #
     #  slot_name    string           Member name of the slot in the type object
 
@@ -364,6 +366,15 @@ pymethod_signature = Signature("T*", "O")
 
 #------------------------------------------------------------------------------------------
 #
+#  Signatures for simple Python functions.
+#
+#------------------------------------------------------------------------------------------
+
+pyfunction_noargs = Signature("-", "O")
+pyfunction_onearg = Signature("-O", "O")
+
+#------------------------------------------------------------------------------------------
+#
 #  Signatures for the various kinds of function that
 #  can appear in the type object and its substructures.
 #
@@ -377,6 +388,7 @@ iternaryfunc = Signature("TOO", "O")       # typedef PyObject * (*ternaryfunc)(P
 callfunc = Signature("T*", "O")            # typedef PyObject * (*ternaryfunc)(PyObject *, PyObject *, PyObject *);
 inquiry = Signature("T", "i")              # typedef int (*inquiry)(PyObject *);
 lenfunc = Signature("T", "Z")              # typedef Py_ssize_t (*lenfunc)(PyObject *);
+
                                            # typedef int (*coercion)(PyObject **, PyObject **);
 intargfunc = Signature("Ti", "O")          # typedef PyObject *(*intargfunc)(PyObject *, int);
 ssizeargfunc = Signature("TZ", "O")        # typedef PyObject *(*ssizeargfunc)(PyObject *, Py_ssize_t);
@@ -386,6 +398,7 @@ intobjargproc = Signature("TiO", 'r')      # typedef int(*intobjargproc)(PyObjec
 ssizeobjargproc = Signature("TZO", 'r')    # typedef int(*ssizeobjargproc)(PyObject *, Py_ssize_t, PyObject *);
 intintobjargproc = Signature("TiiO", 'r')  # typedef int(*intintobjargproc)(PyObject *, int, int, PyObject *);
 ssizessizeobjargproc = Signature("TZZO", 'r') # typedef int(*ssizessizeobjargproc)(PyObject *, Py_ssize_t, Py_ssize_t, PyObject *);
+
 intintargproc = Signature("Tii", 'r')
 ssizessizeargproc = Signature("TZZ", 'r')
 objargfunc = Signature("TO", "O")
@@ -397,7 +410,7 @@ getcharbufferproc = Signature("TiS", 'i')  # typedef int (*getcharbufferproc)(Py
 readbufferproc = Signature("TZP", "Z")     # typedef Py_ssize_t (*readbufferproc)(PyObject *, Py_ssize_t, void **);
 writebufferproc = Signature("TZP", "Z")    # typedef Py_ssize_t (*writebufferproc)(PyObject *, Py_ssize_t, void **);
 segcountproc = Signature("TZ", "Z")        # typedef Py_ssize_t (*segcountproc)(PyObject *, Py_ssize_t *);
-writebufferproc = Signature("TZS", "Z")	# typedef Py_ssize_t (*charbufferproc)(PyObject *, Py_ssize_t, char **);
+writebufferproc = Signature("TZS", "Z")    # typedef Py_ssize_t (*charbufferproc)(PyObject *, Py_ssize_t, char **);
 objargproc = Signature("TO", 'r')          # typedef int (*objobjproc)(PyObject *, PyObject *);
                                            # typedef int (*visitproc)(PyObject *, void *);
                                            # typedef int (*traverseproc)(PyObject *, visitproc, void *);
@@ -486,11 +499,13 @@ PyNumberMethods = (
     MethodSlot(binaryfunc, "nb_true_divide", "__truediv__"),
     MethodSlot(ibinaryfunc, "nb_inplace_floor_divide", "__ifloordiv__"),
     MethodSlot(ibinaryfunc, "nb_inplace_true_divide", "__itruediv__"),
-    MethodSlot(unaryfunc, "nb_index", "__index__", flag = "Py_TPFLAGS_HAVE_INDEX")
+
+    # Added in release 2.5
+    MethodSlot(unaryfunc, "nb_index", "__index__", min_python_version=(2,5)),
 )
 
 PySequenceMethods = (
-    MethodSlot(lenfunc, "sq_length", "__len__"),
+    MethodSlot(lenfunc, "sq_length", "__len__"),    # EmptySlot("sq_length"), # mp_length used instead
     EmptySlot("sq_concat"), # nb_add used instead
     EmptySlot("sq_repeat"), # nb_multiply used instead
     SyntheticSlot("sq_item", ["__getitem__"], "0"),    #EmptySlot("sq_item"),   # mp_subscript used instead
@@ -590,11 +605,11 @@ slot_table = (
 #
 #  Descriptors for special methods which don't appear directly
 #  in the type object or its substructures. These methods are
-#  called from slot functions synthesized by Pyrex.
+#  called from slot functions synthesized by Cython.
 #
 #------------------------------------------------------------------------------------------
 
-MethodSlot(initproc, "", "__cinit__")
+MethodSlot(initproc, "", "__new__")
 MethodSlot(destructor, "", "__dealloc__")
 MethodSlot(objobjargproc, "", "__setitem__")
 MethodSlot(objargproc, "", "__delitem__")
@@ -606,3 +621,12 @@ MethodSlot(delattrofunc, "", "__delattr__")
 MethodSlot(descrgetfunc, "", "__get__")
 MethodSlot(descrsetfunc, "", "__set__")
 MethodSlot(descrdelfunc, "", "__delete__")
+
+
+# Method flags for python-exposed methods. 
+
+method_noargs   = "METH_NOARGS"
+method_onearg   = "METH_O"
+method_varargs  = "METH_VARARGS"
+method_keywords = "METH_KEYWORDS"
+method_coexist  = "METH_COEXIST"

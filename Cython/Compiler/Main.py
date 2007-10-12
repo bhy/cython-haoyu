@@ -1,10 +1,10 @@
 #
-#   Pyrex Top Level
+#   Cython Top Level
 #
 
 import os, sys
 if sys.version_info[:2] < (2, 2):
-    print >>sys.stderr, "Sorry, Pyrex requires Python 2.2 or later"
+    print >>sys.stderr, "Sorry, Cython requires Python 2.2 or later"
     sys.exit(1)
 
 import os
@@ -16,9 +16,7 @@ from Errors import PyrexError, CompileError, error
 import Parsing
 from Symtab import BuiltinScope, ModuleScope
 import Code
-from Pyrex.Utils import replace_suffix
-import Builtin
-from Pyrex import Utils
+from Cython.Utils import replace_suffix
 
 verbose = 0
 
@@ -33,8 +31,7 @@ class Context:
     #  include_directories   [string]
     
     def __init__(self, include_directories):
-        #self.modules = {"__builtin__" : BuiltinScope()}
-        self.modules = {"__builtin__" : Builtin.builtin_scope}
+        self.modules = {"__builtin__" : BuiltinScope()}
         self.include_directories = include_directories
         
     def find_module(self, module_name, 
@@ -85,7 +82,8 @@ class Context:
                 try:
                     if debug_find_module:
                         print "Context.find_module: Parsing", pxd_pathname
-                    pxd_tree = self.parse(pxd_pathname, scope.type_names, pxd = 1)
+                    pxd_tree = self.parse(pxd_pathname, scope.type_names, pxd = 1,
+                                          full_module_name = module_name)
                     pxd_tree.analyse_declarations(scope)
                 except CompileError:
                     pass
@@ -94,7 +92,10 @@ class Context:
     def find_pxd_file(self, module_name, pos):
         # Search include directories for the .pxd file
         # corresponding to the given (full) module name.
-        pxd_filename = "%s.pxd" % module_name
+        if "." in module_name:
+            pxd_filename = "%s.pxd" % os.path.join(*module_name.split('.'))
+        else:
+            pxd_filename = "%s.pxd" % module_name
         return self.search_include_directories(pxd_filename, pos)
     
     def find_include_file(self, filename, pos):
@@ -133,33 +134,38 @@ class Context:
             self.modules[name] = scope
         return scope
 
-    def parse(self, source_filename, type_names, pxd):
+    def parse(self, source_filename, type_names, pxd, full_module_name):
         # Parse the given source file and return a parse tree.
         f = open(source_filename, "rU")
         s = PyrexScanner(f, source_filename, 
             type_names = type_names, context = self)
         try:
-            tree = Parsing.p_module(s, pxd)
+            tree = Parsing.p_module(s, pxd, full_module_name)
         finally:
             f.close()
         if Errors.num_errors > 0:
             raise CompileError
         return tree
 
-    def extract_module_name(self, path):
+    def extract_module_name(self, path, options):
         # Get the module name out of a source file pathname.
         _, tail = os.path.split(path)
         name, _ = os.path.splitext(tail)
         return name
 
-    def compile(self, source, options = None):
+    def compile(self, source, options = None, full_module_name = None):
         # Compile a Pyrex implementation file in this context
         # and return a CompilationResult.
         if not options:
             options = default_options
         result = CompilationResult()
         cwd = os.getcwd()
+
+        if full_module_name is None:
+            full_module_name, _ = os.path.splitext(source.replace('/', '.'))
+
         source = os.path.join(cwd, source)
+        
         if options.use_listing_file:
             result.listing_file = replace_suffix(source, ".lis")
             Errors.open_listing_file(result.listing_file,
@@ -174,29 +180,22 @@ class Context:
             else:
                 c_suffix = ".c"
             result.c_file = replace_suffix(source, c_suffix)
-        c_stat = None
-        if result.c_file:
-            try:
-                c_stat = os.stat(result.c_file)
-            except EnvironmentError:
-                pass
-        module_name = self.extract_module_name(source)
+        module_name = self.extract_module_name(source, options)
         initial_pos = (source, 1, 0)
         scope = self.find_module(module_name, pos = initial_pos, need_pxd = 0)
         errors_occurred = False
         try:
-            tree = self.parse(source, scope.type_names, pxd = 0)
-            tree.process_implementation(scope, options, result)
+            tree = self.parse(source, scope.type_names, pxd = 0, full_module_name = full_module_name)
+            tree.process_implementation(scope, result)
         except CompileError:
             errors_occurred = True
         Errors.close_listing_file()
         result.num_errors = Errors.num_errors
         if result.num_errors > 0:
             errors_occurred = True
-        if errors_occurred and result.c_file:
+        if errors_occurred:
             try:
-                #os.unlink(result.c_file)
-                Utils.castrate_file(result.c_file, c_stat)
+                os.unlink(result.c_file)
             except EnvironmentError:
                 pass
             result.c_file = None
@@ -219,14 +218,13 @@ class Context:
 
 class CompilationOptions:
     """
-    Options to the Pyrex compiler:
+    Options to the Cython compiler:
     
     show_version      boolean   Display version number
     use_listing_file  boolean   Generate a .lis file
     errors_to_stderr  boolean   Echo errors to stderr when using .lis
     include_path      [string]  Directories to search for include files
     output_file       string    Name of generated .c file
-    generate_pxi      boolean   Generate .pxi file for public declarations
     
     Following options are experimental and only used on MacOSX:
     
@@ -240,22 +238,17 @@ class CompilationOptions:
         self.include_path = []
         self.objects = []
         if defaults:
-            if isinstance(defaults, CompilationOptions):
-                defaults = defaults.__dict__
-        else:
-            defaults = default_options
-        self.__dict__.update(defaults)
+            self.__dict__.update(defaults.__dict__)
         self.__dict__.update(kw)
 
 
 class CompilationResult:
     """
-    Results from the Pyrex compiler:
+    Results from the Cython compiler:
     
     c_file           string or None   The generated C source file
     h_file           string or None   The generated C header file
     i_file           string or None   The generated .pxi file
-    api_file         string or None   The generated C API .h file
     listing_file     string or None   File of error messages
     object_file      string or None   Result of compiling the C file
     extension_file   string or None   Result of linking the object file
@@ -266,17 +259,17 @@ class CompilationResult:
         self.c_file = None
         self.h_file = None
         self.i_file = None
-        self.api_file = None
         self.listing_file = None
         self.object_file = None
         self.extension_file = None
 
 
-def compile(source, options = None, c_compile = 0, c_link = 0):
+def compile(source, options = None, c_compile = 0, c_link = 0,
+            full_module_name = None):
     """
     compile(source, options = default_options)
     
-    Compile the given Pyrex implementation file and return
+    Compile the given Cython implementation file and return
     a CompilationResult object describing what was produced.
     """
     if not options:
@@ -287,7 +280,7 @@ def compile(source, options = None, c_compile = 0, c_link = 0):
     if c_link:
         options.obj_only = 0
     context = Context(options.include_path)
-    return context.compile(source, options)
+    return context.compile(source, options, full_module_name)
 
 #------------------------------------------------------------------------
 #
@@ -305,7 +298,7 @@ def main(command_line = 0):
         options = default_options
         sources = args
     if options.show_version:
-        print >>sys.stderr, "Pyrex version %s" % Version.version
+        print >>sys.stderr, "Cython version %s" % Version.version
     context = Context(options.include_path)
     for source in sources:
         try:
@@ -324,21 +317,20 @@ def main(command_line = 0):
 #
 #------------------------------------------------------------------------
 
-default_options = dict(
+default_options = CompilationOptions(
     show_version = 0,
     use_listing_file = 0,
     errors_to_stderr = 1,
     c_only = 1,
     obj_only = 1,
     cplus = 0,
-    output_file = None,
-    generate_pxi = 0)
+    output_file = None)
     
 if sys.platform == "mac":
-    from Pyrex.Mac.MacSystem import c_compile, c_link, CCompilerError
-    default_options['use_listing_file'] = 1
+    from Cython.Mac.MacSystem import c_compile, c_link, CCompilerError
+    default_options.use_listing_file = 1
 elif sys.platform == "darwin":
-    from Pyrex.Mac.DarwinSystem import c_compile, c_link, CCompilerError
+    from Cython.Mac.DarwinSystem import c_compile, c_link, CCompilerError
 else:
     c_compile = None
     c_link = None

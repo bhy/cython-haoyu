@@ -3,8 +3,10 @@
 #
 
 import Naming
-from Pyrex.Utils import open_new_file
+import Options
+from Cython.Utils import open_new_file
 from PyrexTypes import py_object_type, typecast
+from TypeSlots import method_coexist
 
 class CCodeWriter:
     # f                file            output file
@@ -19,7 +21,9 @@ class CCodeWriter:
     # in_try_finally   boolean         inside try of try...finally
     # filename_table   {string : int}  for finding filename table indexes
     # filename_list    [string]        filenames in filename table order
-    # exc_vars         (string * 3)    exception variables for reraise, or None
+    # input_file_contents dict         contents (=list of lines) of any file that was used as input
+    #                                  to create this output C code.  This is
+    #                                  used to annotate the comments. 
     
     in_try_finally = 0
     
@@ -33,7 +37,7 @@ class CCodeWriter:
         self.error_label = None
         self.filename_table = {}
         self.filename_list = []
-        self.exc_vars = None
+        self.input_file_contents = {}
     
     def putln(self, code = ""):
         if self.marker and self.bol:
@@ -76,10 +80,30 @@ class CCodeWriter:
     
     def indent(self):
         self.f.write("  " * self.level)
-    
+
+    def file_contents(self, file):
+        try:
+            return self.input_file_contents[file]
+        except KeyError:
+            F = open(file).readlines()
+            self.input_file_contents[file] = F
+            return F
+
+    def get_py_version_hex(self, pyversion):
+        return "0x%02X%02X%02X%02X" % (tuple(pyversion) + (0,0,0,0))[:4]
+
     def mark_pos(self, pos):
         file, line, col = pos
-        self.marker = '"%s":%s' % (file, line)
+        contents = self.file_contents(file)
+
+        context = ''
+        for i in range(max(0,line-3), min(line+2, len(contents))):
+            s = contents[i]
+            if i+1 == line:   # line numbers in pyrex start counting up from 1
+                s = s.rstrip() + '             # <<<<<<<<<<<<<< ' + '\n'
+            context += " * " + s
+        
+        self.marker = '"%s":%s\n%s' % (file, line, context)
 
     def init_labels(self):
         self.label_counter = 0
@@ -158,13 +182,11 @@ class CCodeWriter:
     
     def put_var_declaration(self, entry, static = 0, dll_linkage = None,
             definition = True):
-        #print "Code.put_var_declaration:", entry.name, repr(entry.type) ###
+        #print "Code.put_var_declaration:", entry.name, "definition =", definition ###
         visibility = entry.visibility
         if visibility == 'private' and not definition:
-            #print "...private and not definition, skipping" ###
             return
         if not entry.used and visibility == "private":
-            #print "not used and private, skipping" ###
             return
         storage_class = ""
         if visibility == 'extern':
@@ -220,7 +242,10 @@ class CCodeWriter:
 
     def put_var_decref(self, entry):
         if entry.type.is_pyobject:
-            self.putln("Py_DECREF(%s);" % self.entry_as_pyobject(entry))
+            if entry.init_to_none is False:
+                self.putln("Py_XDECREF(%s);" % self.entry_as_pyobject(entry))
+            else:
+                self.putln("Py_DECREF(%s);" % self.entry_as_pyobject(entry))
     
     def put_var_decref_clear(self, entry):
         if entry.type.is_pyobject:
@@ -258,24 +283,38 @@ class CCodeWriter:
     
     def put_init_var_to_py_none(self, entry, template = "%s"):
         code = template % entry.cname
+        #if entry.type.is_extension_type:
+        #	code = "((PyObject*)%s)" % code
         self.put_init_to_py_none(code, entry.type)
+
+    def put_py_gil_state_ensure(self, cname):
+        self.putln("PyGILState_STATE %s;" % cname)
+        self.putln("%s = PyGILState_Ensure();" % cname)
+
+    def put_py_gil_state_release(self, cname):
+        self.putln("PyGILState_Release(%s);" % cname)
 
     def put_pymethoddef(self, entry, term):
         if entry.doc:
             doc_code = entry.doc_cname
         else:
             doc_code = 0
-        self.putln(
-            '{"%s", (PyCFunction)%s, METH_VARARGS|METH_KEYWORDS, %s}%s' % (
-                entry.name, 
-                entry.func_cname, 
-                doc_code,
-                term))
+        method_flags = entry.signature.method_flags()
+        if method_flags:
+            if entry.is_special:
+                method_flags += [method_coexist]
+            self.putln(
+                '{"%s", (PyCFunction)%s, %s, %s}%s' % (
+                    entry.name, 
+                    entry.func_cname,
+                    "|".join(method_flags),
+                    doc_code,
+                    term))
     
-    def put_h_guard(self, guard):
-        self.putln("#ifndef %s" % guard)
-        self.putln("#define %s" % guard)
-    
+    def put_error_if_neg(self, pos, value):
+#        return self.putln("if (unlikely(%s < 0)) %s" % (value, self.error_goto(pos)))  # TODO this path is almost _never_ taken, yet this macro makes is slower!
+        return self.putln("if (%s < 0) %s" % (value, self.error_goto(pos)))
+
     def error_goto(self, pos):
         lbl = self.error_label
         self.use_label(lbl)
@@ -286,6 +325,21 @@ class CCodeWriter:
             Naming.lineno_cname,
             pos[1],
             lbl)
+            
+    def error_goto_if(self, cond, pos):
+        if Options.gcc_branch_hints:
+            return "if (unlikely(%s)) %s" % (cond, self.error_goto(pos))
+        else:
+            return "if (%s) %s" % (cond, self.error_goto(pos))
+            
+    def error_goto_if_null(self, cname, pos):
+        return self.error_goto_if("!%s" % cname, pos)
+    
+    def error_goto_if_neg(self, cname, pos):
+        return self.error_goto_if("%s < 0" % cname, pos)
+    
+    def error_goto_if_PyErr(self, pos):
+        return self.error_goto_if("PyErr_Occurred()", pos)
     
     def lookup_filename(self, filename):
         try:
