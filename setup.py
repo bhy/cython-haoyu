@@ -1,6 +1,6 @@
 from distutils.core import setup
 from distutils.sysconfig import get_python_lib
-import os
+import os, sys
 import sys
 from Cython.Compiler.Version import version
 
