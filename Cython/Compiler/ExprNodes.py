@@ -10,6 +10,7 @@ import Naming
 from Nodes import Node
 import PyrexTypes
 from PyrexTypes import py_object_type, c_long_type, typecast, error_type
+from Builtin import list_type, tuple_type, dict_type
 import Symtab
 import Options
 from Annotate import AnnotationItem
@@ -1519,12 +1520,15 @@ class SimpleCallNode(ExprNode):
     #  coerced_self   ExprNode or None     used internally
     #  wrapper_call   bool                 used internally
     
+    # optimized_call  str or None
+    
     subexprs = ['self', 'coerced_self', 'function', 'args', 'arg_tuple']
     
     self = None
     coerced_self = None
     arg_tuple = None
     wrapper_call = False
+    optimized_call = None
     
     def compile_time_value(self, denv):
         function = self.function.compile_time_value(denv)
@@ -1538,6 +1542,15 @@ class SimpleCallNode(ExprNode):
         function = self.function
         function.is_called = 1
         self.function.analyse_types(env)
+        if function.is_attribute and function.is_py_attr and \
+           function.attribute == "append" and len(self.args) == 1:
+            # L.append(x) is almost always applied to a list
+            self.py_func = self.function
+            self.function = NameNode(pos=self.function.pos, name="__Pyx_PyObject_Append")
+            self.function.analyse_types(env)
+            self.self = self.py_func.obj
+            function.obj = CloneNode(self.self)
+            env.use_utility_code(append_utility_code)
         if function.is_attribute and function.entry and function.entry.is_cmethod:
             # Take ownership of the object from which the attribute
             # was obtained, because we need to pass it as 'self'.
@@ -2040,9 +2053,12 @@ class AttributeNode(ExprNode):
         obj_code = obj.result_as(obj.type)
         #print "...obj_code =", obj_code ###
         if self.entry and self.entry.is_cmethod:
-            return "((struct %s *)%s%s%s)->%s" % (
-                obj.type.vtabstruct_cname, obj_code, self.op, 
-                obj.type.vtabslot_cname, self.member)
+            if obj.type.is_extension_type:
+                return "((struct %s *)%s%s%s)->%s" % (
+                    obj.type.vtabstruct_cname, obj_code, self.op, 
+                    obj.type.vtabslot_cname, self.member)
+            else:
+                return self.member
         else:
             return "%s%s%s" % (obj_code, self.op, self.member)
     
@@ -2249,11 +2265,11 @@ class TupleNode(SequenceNode):
     
     def analyse_types(self, env):
         if len(self.args) == 0:
-            self.type = py_object_type
             self.is_temp = 0
             self.is_literal = 1
         else:
             SequenceNode.analyse_types(self, env)
+        self.type = tuple_type
             
     def calculate_result_code(self):
         if len(self.args) > 0:
@@ -2298,6 +2314,10 @@ class TupleNode(SequenceNode):
 class ListNode(SequenceNode):
     #  List constructor.
     
+    def analyse_types(self, env):
+        SequenceNode.analyse_types(self, env)
+        self.type = list_type
+
     def compile_time_value(self, denv):
         return self.compile_time_value_list(denv)
 
@@ -2330,7 +2350,7 @@ class ListComprehensionNode(SequenceNode):
     is_sequence_constructor = 0 # not unpackable
 
     def analyse_types(self, env): 
-        self.type = py_object_type
+        self.type = list_type
         self.is_temp = 1
         self.append.target = self # this is a CloneNode used in the PyList_Append in the inner loop
         
@@ -2389,7 +2409,7 @@ class DictNode(ExprNode):
     def analyse_types(self, env):
         for item in self.key_value_pairs:
             item.analyse_types(env)
-        self.type = py_object_type
+        self.type = dict_type
         self.is_temp = 1
     
     def allocate_temps(self, env, result = None):
@@ -3707,7 +3727,7 @@ class PyTypeTestNode(CoercionNode):
     def __init__(self, arg, dst_type, env):
         #  The arg is know to be a Python object, and
         #  the dst_type is known to be an extension type.
-        assert dst_type.is_extension_type, "PyTypeTest on non extension type"
+        assert dst_type.is_extension_type or dst_type.is_builtin_type, "PyTypeTest on non extension type"
         CoercionNode.__init__(self, arg)
         self.type = dst_type
         self.result_ctype = arg.ctype()
@@ -3728,9 +3748,8 @@ class PyTypeTestNode(CoercionNode):
     def generate_result_code(self, code):
         if self.type.typeobj_is_available():
             code.putln(
-                "if (!__Pyx_TypeTest(%s, %s)) %s" % (
-                    self.arg.py_result(), 
-                    self.type.typeptr_cname,
+                "if (!(%s)) %s" % (
+                    self.type.type_test_code(self.arg.py_result()),
                     code.error_goto(self.pos)))
         else:
             error(self.pos, "Cannot test type of extern C class "
@@ -4105,3 +4124,18 @@ static void __Pyx_CppExn2PyErr() {
 """,""]
 
 #------------------------------------------------------------------------------------
+
+append_utility_code = [
+"""
+static inline PyObject* __Pyx_PyObject_Append(PyObject* L, PyObject* x) {
+    if (likely(PyList_CheckExact(L))) {
+        if (PyList_Append(L, x) < 0) return NULL;
+        Py_INCREF(Py_None);
+        return Py_None; // this is just to have an accurate signature
+    }
+    else {
+        return PyObject_CallMethod(L, "append", "O", x);
+    }
+}
+""",""
+]
