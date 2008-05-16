@@ -3,6 +3,7 @@
 #           and associated know-how.
 #
 
+from Cython import Utils
 import Naming
 import PyrexTypes
 import sys
@@ -121,11 +122,13 @@ class SlotDescriptor:
     #  slot_name    string           Member name of the slot in the type object
     #  is_initialised_dynamically    Is initialised by code in the module init function
     #  flag                          Py_TPFLAGS_XXX value indicating presence of slot
+    #  py3k                          Indicates presence of slot in Python 3
     
-    def __init__(self, slot_name, dynamic = 0, flag = None):
+    def __init__(self, slot_name, dynamic = 0, flag = None, py3k = True):
         self.slot_name = slot_name
         self.is_initialised_dynamically = dynamic
         self.flag = flag
+        self.py3k = py3k
 
     def generate(self, scope, code):
         if self.is_initialised_dynamically:
@@ -133,9 +136,14 @@ class SlotDescriptor:
         else:
             value = self.slot_code(scope)
         flag = self.flag
+        py3k = self.py3k
+        if not py3k:
+            code.putln("#if PY_MAJOR_VERSION < 3")
         if flag:
-            code.putln("#if Py_TPFLAGS_DEFAULT & %s" % flag)
+            code.putln("#if (PY_MAJOR_VERSION >= 3) || (Py_TPFLAGS_DEFAULT & %s)" % flag)
         code.putln("%s, /*%s*/" % (value, self.slot_name))
+        if not py3k:
+            code.putln("#endif")
         if flag:
             code.putln("#endif")
 
@@ -183,8 +191,8 @@ class MethodSlot(SlotDescriptor):
     #  method_name  string           The __xxx__ name of the method
     #  default      string or None   Default value of the slot
     
-    def __init__(self, signature, slot_name, method_name, default = None, flag = None):
-        SlotDescriptor.__init__(self, slot_name, flag = flag)
+    def __init__(self, signature, slot_name, method_name, default = None, flag = None, py3k=True):
+        SlotDescriptor.__init__(self, slot_name, flag = flag, py3k = py3k)
         self.signature = signature
         self.slot_name = slot_name
         self.method_name = method_name
@@ -291,7 +299,11 @@ class DocStringSlot(SlotDescriptor):
     
     def slot_code(self, scope):
         if scope.doc is not None:
-            return '"%s"' % scope.doc
+            if scope.doc.is_unicode:
+                doc = scope.doc.utf8encode()
+            else:
+                doc = scope.doc.byteencode()
+            return '"%s"' % Utils.escape_byte_string(doc)
         else:
             return "0"
 
@@ -515,7 +527,7 @@ PyNumberMethods = (
     MethodSlot(binaryfunc, "nb_add", "__add__"),
     MethodSlot(binaryfunc, "nb_subtract", "__sub__"),
     MethodSlot(binaryfunc, "nb_multiply", "__mul__"),
-    MethodSlot(binaryfunc, "nb_divide", "__div__"),
+    MethodSlot(binaryfunc, "nb_divide", "__div__", py3k = False),
     MethodSlot(binaryfunc, "nb_remainder", "__mod__"),
     MethodSlot(binaryfunc, "nb_divmod", "__divmod__"),
     MethodSlot(ternaryfunc, "nb_power", "__pow__"),
@@ -540,7 +552,7 @@ PyNumberMethods = (
     MethodSlot(ibinaryfunc, "nb_inplace_add", "__iadd__"),
     MethodSlot(ibinaryfunc, "nb_inplace_subtract", "__isub__"),
     MethodSlot(ibinaryfunc, "nb_inplace_multiply", "__imul__"),
-    MethodSlot(ibinaryfunc, "nb_inplace_divide", "__idiv__"),
+    MethodSlot(ibinaryfunc, "nb_inplace_divide", "__idiv__", py3k = False),
     MethodSlot(ibinaryfunc, "nb_inplace_remainder", "__imod__"),
     MethodSlot(ternaryfunc, "nb_inplace_power", "__ipow__"), # NOT iternaryfunc!!!
     MethodSlot(ibinaryfunc, "nb_inplace_lshift", "__ilshift__"),
@@ -580,10 +592,10 @@ PyMappingMethods = (
 )
 
 PyBufferProcs = (
-    MethodSlot(getreadbufferproc, "bf_getreadbuffer", "__getreadbuffer__"),
-    MethodSlot(getwritebufferproc, "bf_getwritebuffer", "__getwritebuffer__"),
-    MethodSlot(getsegcountproc, "bf_getsegcount", "__getsegcount__"),
-    MethodSlot(getcharbufferproc, "bf_getcharbuffer", "__getcharbuffer__"),
+    MethodSlot(getreadbufferproc, "bf_getreadbuffer", "__getreadbuffer__", py3k = False),
+    MethodSlot(getwritebufferproc, "bf_getwritebuffer", "__getwritebuffer__", py3k = False),
+    MethodSlot(getsegcountproc, "bf_getsegcount", "__getsegcount__", py3k = False),
+    MethodSlot(getcharbufferproc, "bf_getcharbuffer", "__getcharbuffer__", py3k = False),
 )
 
 #------------------------------------------------------------------------------------------
