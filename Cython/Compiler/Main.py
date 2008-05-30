@@ -15,7 +15,7 @@ except NameError:
 
 from time import time
 import Version
-from Scanning import PyrexScanner
+from Scanning import PyrexScanner, FileSourceDescriptor
 import Errors
 from Errors import PyrexError, CompileError, error
 import Parsing
@@ -23,7 +23,22 @@ from Symtab import BuiltinScope, ModuleScope
 import Code
 from Cython.Utils import replace_suffix
 from Cython import Utils
-import Transform
+
+# Note: PHASES and TransformSet should be removed soon; but that's for
+# another day and another commit.
+PHASES = [
+    'before_analyse_function', # run in FuncDefNode.generate_function_definitions
+    'after_analyse_function'   # run in FuncDefNode.generate_function_definitions
+]
+
+class TransformSet(dict):
+    def __init__(self):
+        for name in PHASES:
+            self[name] = []
+    def run(self, name, node, **options):
+        assert name in self, "Transform phase %s not defined" % name
+        for transform in self[name]:
+            transform(node, phase=name, **options)
 
 verbose = 0
 
@@ -93,7 +108,8 @@ class Context:
                 try:
                     if debug_find_module:
                         print("Context.find_module: Parsing %s" % pxd_pathname)
-                    pxd_tree = self.parse(pxd_pathname, scope.type_names, pxd = 1,
+                    source_desc = FileSourceDescriptor(pxd_pathname)
+                    pxd_tree = self.parse(source_desc, scope.type_names, pxd = 1,
                                           full_module_name = module_name)
                     pxd_tree.analyse_declarations(scope)
                 except CompileError:
@@ -124,7 +140,10 @@ class Context:
         # None if not found, but does not report an error.
         dirs = self.include_directories
         if pos:
-            here_dir = os.path.dirname(pos[0])
+            file_desc = pos[0]
+            if not isinstance(file_desc, FileSourceDescriptor):
+                raise RuntimeError("Only file sources for code supported")
+            here_dir = os.path.dirname(file_desc.filename)
             dirs = [here_dir] + dirs
         for dir in dirs:
             path = os.path.join(dir, filename)
@@ -145,19 +164,21 @@ class Context:
             self.modules[name] = scope
         return scope
 
-    def parse(self, source_filename, type_names, pxd, full_module_name):
-        name = Utils.encode_filename(source_filename)
+    def parse(self, source_desc, type_names, pxd, full_module_name):
+        if not isinstance(source_desc, FileSourceDescriptor):
+            raise RuntimeError("Only file sources for code supported")
+        source_filename = Utils.encode_filename(source_desc.filename)
         # Parse the given source file and return a parse tree.
         try:
             f = Utils.open_source_file(source_filename, "rU")
             try:
-                s = PyrexScanner(f, name, source_encoding = f.encoding,
+                s = PyrexScanner(f, source_desc, source_encoding = f.encoding,
                                  type_names = type_names, context = self)
                 tree = Parsing.p_module(s, pxd, full_module_name)
             finally:
                 f.close()
         except UnicodeDecodeError, msg:
-            error((name, 0, 0), "Decoding error, missing or incorrect coding=<encoding-name> at top of source (%s)" % msg)
+            error((source_desc, 0, 0), "Decoding error, missing or incorrect coding=<encoding-name> at top of source (%s)" % msg)
         if Errors.num_errors > 0:
             raise CompileError
         return tree
@@ -205,6 +226,7 @@ class Context:
             except EnvironmentError:
                 pass
         module_name = full_module_name # self.extract_module_name(source, options)
+        source = FileSourceDescriptor(source)
         initial_pos = (source, 1, 0)
         scope = self.find_module(module_name, pos = initial_pos, need_pxd = 0)
         errors_occurred = False
@@ -347,6 +369,8 @@ def main(command_line = 0):
     if any_failures:
         sys.exit(1)
 
+
+
 #------------------------------------------------------------------------
 #
 #  Set the default options depending on the platform
@@ -363,7 +387,7 @@ default_options = dict(
     output_file = None,
     annotate = False,
     generate_pxi = 0,
-    transforms = Transform.TransformSet(),
+    transforms = TransformSet(),
     working_path = "")
     
 if sys.platform == "mac":

@@ -5,7 +5,7 @@
 import os, re
 from string import join, replace
 from types import ListType, TupleType
-from Scanning import PyrexScanner
+from Scanning import PyrexScanner, FileSourceDescriptor
 import Nodes
 import ExprNodes
 from ModuleNode import ModuleNode
@@ -755,11 +755,11 @@ def p_expression_or_assignment(s):
         s.next()
         expr_list.append(p_expr(s))
     if len(expr_list) == 1:
-        if re.match(r"([+*/\%^\&|-]|<<|>>|\*\*|//)=", s.sy):
+        if re.match("[+*/\%^\&|-]=", s.sy):
             lhs = expr_list[0]
             if not isinstance(lhs, (ExprNodes.AttributeNode, ExprNodes.IndexNode, ExprNodes.NameNode) ):
                 error(lhs.pos, "Illegal operand for inplace operation.")
-            operator = s.sy[:-1]
+            operator = s.sy[0]
             s.next()
             rhs = p_expr(s)
             return Nodes.InPlaceAssignmentNode(lhs.pos, operator = operator, lhs = lhs, rhs = rhs)
@@ -944,11 +944,8 @@ def p_from_import_statement(s, first_statement = 0):
     else:
         s.error("Expected 'import' or 'cimport'")
     if s.sy == '*':
-#        s.error("'import *' not supported")
-        imported_names = [(s.position(), "*", None)]
-        s.next()
-    else:
-        imported_names = [p_imported_name(s)]
+        s.error("'import *' not supported")
+    imported_names = [p_imported_name(s)]
     while s.sy == ',':
         s.next()
         imported_names.append(p_imported_name(s))
@@ -1083,13 +1080,9 @@ def p_for_bounds(s):
         s.next()
         iterator = p_for_iterator(s)
         return { 'target': target, 'iterator': iterator }
-    else:
-        if s.sy == 'from':
-            s.next()
-            bound1 = p_bit_expr(s)
-        else:
-            # Support shorter "for a <= x < b" syntax
-            bound1, target = target, None
+    elif s.sy == 'from':
+        s.next()
+        bound1 = p_bit_expr(s)
         rel1 = p_for_from_relation(s)
         name2_pos = s.position()
         name2 = p_ident(s)
@@ -1097,15 +1090,12 @@ def p_for_bounds(s):
         rel2 = p_for_from_relation(s)
         bound2 = p_bit_expr(s)
         step = p_for_from_step(s)
-        if target is None:
-            target = ExprNodes.NameNode(name2_pos, name = name2)
-        else:
-            if not target.is_name:
-                error(target.pos, 
-                    "Target of for-from statement must be a variable name")
-            elif name2 != target.name:
-                error(name2_pos,
-                    "Variable name in for-from range does not match target")
+        if not target.is_name:
+            error(target.pos, 
+                "Target of for-from statement must be a variable name")
+        elif name2 != target.name:
+            error(name2_pos,
+                "Variable name in for-from range does not match target")
         if rel1[0] != rel2[0]:
             error(rel2_pos,
                 "Relation directions in for-from do not match")
@@ -1115,6 +1105,8 @@ def p_for_bounds(s):
                 'relation2': rel2,
                 'bound2': bound2,
                 'step': step }
+    else:
+        s.error("Expected 'in' or 'from'")
 
 def p_for_from_relation(s):
     if s.sy in inequality_relations:
@@ -1205,7 +1197,8 @@ def p_include_statement(s, level):
         include_file_path = s.context.find_include_file(include_file_name, pos)
         if include_file_path:
             f = Utils.open_source_file(include_file_path, mode="rU")
-            s2 = PyrexScanner(f, include_file_path, s, source_encoding=f.encoding)
+            source_desc = FileSourceDescriptor(include_file_path)
+            s2 = PyrexScanner(f, source_desc, s, source_encoding=f.encoding)
             try:
                 tree = p_statement_list(s2, level)
             finally:
@@ -1294,7 +1287,7 @@ def p_DEF_statement(s):
     return Nodes.PassStatNode(pos)
 
 def p_IF_statement(s, level, cdef_flag, visibility, api):
-    pos = s.position()
+    pos = s.position
     saved_eval = s.compile_time_eval
     current_eval = saved_eval
     denv = s.compile_time_env

@@ -5,8 +5,3 @@ cdef void spam():
     else:
         k = j
 
-    # new syntax
-    for 0 <= i < 10:
-        j = i
-    else:
-        j = k
