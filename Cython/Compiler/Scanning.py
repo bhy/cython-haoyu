@@ -17,6 +17,8 @@ from Cython.Plex.Errors import UnrecognizedInput
 from Errors import CompileError, error
 from Lexicon import string_prefixes, raw_prefixes, make_lexicon
 
+from Cython import Utils
+
 plex_version = getattr(Plex, '_version', None)
 #print "Plex version:", plex_version ###
 
@@ -203,29 +205,99 @@ def initial_compile_time_env():
 
 #------------------------------------------------------------------
 
+class SourceDescriptor:
+    """
+    A SourceDescriptor should be considered immutable.
+    """
+    def __str__(self):
+        assert False # To catch all places where a descriptor is used directly as a filename
+
+class FileSourceDescriptor(SourceDescriptor):
+    """
+    Represents a code source. A code source is a more generic abstraction
+    for a "filename" (as sometimes the code doesn't come from a file).
+    Instances of code sources are passed to Scanner.__init__ as the
+    optional name argument and will be passed back when asking for
+    the position()-tuple.
+    """
+    def __init__(self, filename):
+        self.filename = filename
+    
+    def get_lines(self, decode=False):
+        # decode is True when called from Code.py (which reserializes in a standard way to ASCII),
+        # while decode is False when called from Errors.py.
+        #
+        # Note that if changing Errors.py in this respect, raising errors over wrong encoding
+        # will no longer be able to produce the line where the encoding problem occurs ...
+        if decode:
+            return Utils.open_source_file(self.filename)
+        else:
+            return open(self.filename)
+    
+    def get_description(self):
+        return self.filename
+    
+    def get_filenametable_entry(self):
+        return self.filename
+    
+    def __eq__(self, other):
+        return isinstance(other, FileSourceDescriptor) and self.filename == other.filename
+
+    def __hash__(self):
+        return hash(self.filename)
+
+    def __repr__(self):
+        return "<FileSourceDescriptor:%s>" % self.filename
+
+class StringSourceDescriptor(SourceDescriptor):
+    """
+    Instances of this class can be used instead of a filenames if the
+    code originates from a string object.
+    """
+    def __init__(self, name, code):
+        self.name = name
+        self.codelines = [x + "\n" for x in code.split("\n")]
+    
+    def get_lines(self, decode=False):
+        return self.codelines
+    
+    def get_description(self):
+        return self.name
+
+    def get_filenametable_entry(self):
+        return "stringsource"
+
+    def __hash__(self):
+        return hash(self.name)
+
+    def __eq__(self, other):
+        return isinstance(other, StringSourceDescriptor) and self.name == other.name
+
+    def __repr__(self):
+        return "<StringSourceDescriptor:%s>" % self.name
+
+#------------------------------------------------------------------
+
 class PyrexScanner(Scanner):
     #  context            Context  Compilation context
     #  type_names         set      Identifiers to be treated as type names
-    #  included_files     [string] Files included with 'include' statement
     #  compile_time_env   dict     Environment for conditional compilation
     #  compile_time_eval  boolean  In a true conditional compilation context
     #  compile_time_expr  boolean  In a compile-time expression context
     resword_dict = build_resword_dict()
 
     def __init__(self, file, filename, parent_scanner = None, 
-                 scope = None, context = None, source_encoding=None):
+                 type_names = None, context = None, source_encoding=None):
         Scanner.__init__(self, get_lexicon(), file, filename)
         if parent_scanner:
             self.context = parent_scanner.context
             self.type_names = parent_scanner.type_names
-            self.included_files = parent_scanner.included_files
             self.compile_time_env = parent_scanner.compile_time_env
             self.compile_time_eval = parent_scanner.compile_time_eval
             self.compile_time_expr = parent_scanner.compile_time_expr
         else:
             self.context = context
-            self.type_names = scope.type_names
-            self.included_files = scope.included_files
+            self.type_names = type_names
             self.compile_time_env = initial_compile_time_env()
             self.compile_time_eval = 1
             self.compile_time_expr = 0

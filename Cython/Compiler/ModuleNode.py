@@ -33,7 +33,7 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
     #  module_temp_cname    string
     #  full_module_name     string
 
-    children_attrs = ["body"]
+    child_attrs = ["body"]
     
     def analyse_declarations(self, env):
         if Options.embed_pos_in_docstring:
@@ -442,6 +442,7 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
 
         code.putln("#if PY_MAJOR_VERSION >= 3")
         code.putln("  #define PyBaseString_Type            PyUnicode_Type")
+        code.putln("  #define PyString_Type                PyBytes_Type")
         code.putln("  #define PyInt_Type                   PyLong_Type")
         code.putln("  #define PyInt_Check(op)              PyLong_Check(op)")
         code.putln("  #define PyInt_CheckExact(op)         PyLong_CheckExact(op)")
@@ -513,8 +514,8 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
         code.putln("")
         code.putln("static char *%s[] = {" % Naming.filenames_cname)
         if code.filename_list:
-            for filename in code.filename_list:
-                filename = os.path.basename(filename)
+            for source_desc in code.filename_list:
+                filename = os.path.basename(source_desc.get_filenametable_entry())
                 escaped_filename = filename.replace("\\", "\\\\").replace('"', r'\"')
                 code.putln('"%s",' % 
                     escaped_filename)

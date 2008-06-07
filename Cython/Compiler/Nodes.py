@@ -2,7 +2,7 @@
 #   Pyrex - Parse tree nodes
 #
 
-import string, sys, os, time
+import string, sys, os, time, copy
 
 import Code
 from Errors import error, warning, InternalError
@@ -39,7 +39,7 @@ def relative_position(pos):
     global absolute_path_length
     if absolute_path_length==0:
         absolute_path_length = len(os.path.abspath(os.getcwd())) 
-    return (pos[0][absolute_path_length+1:], pos[1])
+    return (pos[0].get_filenametable_entry()[absolute_path_length+1:], pos[1])
 
 def embed_position(pos, docstring):
     if not Options.embed_pos_in_docstring:
@@ -66,32 +66,6 @@ def embed_position(pos, docstring):
     doc.encoding = encoding
     return doc
 
-class _AttributeAccessor(object):
-    """Used as the result of the Node.get_children_accessors() generator"""
-    def __init__(self, obj, attrname):
-        self.obj = obj
-        self.attrname = attrname
-    def get(self):
-        try:
-            return getattr(self.obj, self.attrname)
-        except AttributeError:
-            return None
-    def set(self, value):
-        setattr(self.obj, self.attrname, value)
-    def name(self):
-        return self.attrname
-
-class _AttributeIterator(object):
-    """Used as the result of the Node.get_children_accessors() generator"""
-    def __init__(self, obj, attrnames):
-        self.obj = obj
-        self.attrnames = iter(attrnames)
-    def __iter__(self):
-        return self
-    def __next__(self):
-        return _AttributeAccessor(self.obj, self.attrnames.next())
-    next = __next__
-
 class Node(object):
     #  pos         (string, int, int)   Source file position
     #  is_name     boolean              Is a NameNode
@@ -100,13 +74,15 @@ class Node(object):
     is_name = 0
     is_literal = 0
 
-    # All descandants should set child_attrs (see get_child_accessors)    
+    # All descandants should set child_attrs to a list of the attributes
+    # containing nodes considered "children" in the tree. Each such attribute
+    # can either contain a single node or a list of nodes. See Visitor.py.
     child_attrs = None
     
     def __init__(self, pos, **kw):
         self.pos = pos
         self.__dict__.update(kw)
-
+    
     gil_message = "Operation"
 
     def gil_check(self, env):
@@ -116,48 +92,18 @@ class Node(object):
     def gil_error(self):
         error(self.pos, "%s not allowed without gil" % self.gil_message)
 
-    def get_child_accessors(self):
-        """Returns an iterator over the children of the Node. Each member in the
-        iterated list is an object with get(), set(value), and name() methods,
-        which can be used to fetch and replace the child and query the name
-        the relation this node has with the child. For instance, for an
-        assignment node, this code:
-        
-        for child in assignment_node.get_child_accessors():
-            print(child.name())
-            child.set(i_node)
-        
-        will print "lhs", "rhs", and change the assignment statement to "i = i"
-        (assuming that i_node is a node able to represent the variable i in the
-        tree).
-        
-        Any kind of objects can in principle be returned, but the typical
-        candidates are either Node instances or lists of node instances.
-        
-        The object returned in each iteration stage can only be used until the
-        iterator is advanced to the next child attribute. (However, the objects
-        returned by the get() function can be kept).
-        
-        Typically, a Node instance will have other interesting and potentially
-        hierarchical attributes as well. These must be explicitly accessed -- this
-        method only provides access to attributes that are deemed to naturally
-        belong in the parse tree.
-        
-        Descandant classes can either specify child_attrs, override get_child_attrs,
-        or override this method directly in order to provide access to their
-        children. All descendants of Node *must* declare their children -- leaf nodes
-        should simply declare "child_attrs = []".
-        """
-        attrnames = self.get_child_attrs()
-        if attrnames is None:
-            raise InternalError("Children access not implemented for %s" % \
-                self.__class__.__name__)
-        return _AttributeIterator(self, attrnames)
-    
-    def get_child_attrs(self):
-        """Utility method for more easily implementing get_child_accessors.
-        If you override get_child_accessors then this method is not used."""
-        return self.child_attrs
+    def clone_node(self):
+        """Clone the node. This is defined as a shallow copy, except for member lists
+           amongst the child attributes (from get_child_accessors) which are also
+           copied. Lists containing child nodes are thus seen as a way for the node
+           to hold multiple children directly; the list is not treated as a seperate
+           level in the tree."""
+        result = copy.copy(self)
+        for attrname in result.child_attrs:
+            value = getattr(result, attrname)
+            if isinstance(value, list):
+                setattr(result, attrname, value)
+        return result
     
     
     #
@@ -210,23 +156,20 @@ class Node(object):
         try:
             return self._end_pos
         except AttributeError:
-            children = [acc.get() for acc in self.get_child_accessors()]
-            if len(children) == 0:
+            flat = []
+            for attr in self.child_attrs:
+                child = getattr(self, attr)
+                # Sometimes lists, sometimes nodes
+                if child is None:
+                    pass
+                elif isinstance(child, list):
+                    flat += child
+                else:
+                    flat.append(child)
+            if len(flat) == 0:
                 self._end_pos = self.pos
             else:
-                # Sometimes lists, sometimes nodes
-                flat = []
-                for child in children:
-                    if child is None:
-                        pass
-                    elif isinstance(child, list):
-                        flat += child
-                    else:
-                        flat.append(child)
-                if len(flat) == 0:
-                    self._end_pos = self.pos
-                else:
-                    self._end_pos = max([child.end_pos() for child in flat])
+                self._end_pos = max([child.end_pos() for child in flat])
             return self._end_pos
 
 
@@ -2924,7 +2867,50 @@ class IfClauseNode(Node):
         self.condition.annotate(code)
         self.body.annotate(code)
         
+
+class SwitchCaseNode(StatNode):
+    # Generated in the optimization of an if-elif-else node
+    #
+    # conditions    [ExprNode]
+    # body          StatNode
+    
+    child_attrs = ['conditions', 'body']
+    
+    def generate_execution_code(self, code):
+        for cond in self.conditions:
+            code.putln("case %s:" % cond.calculate_result_code())
+        self.body.generate_execution_code(code)
+        code.putln("break;")
         
+    def annotate(self, code):
+        for cond in self.conditions:
+            cond.annotate(code)
+        body.annotate(code)
+
+class SwitchStatNode(StatNode):
+    # Generated in the optimization of an if-elif-else node
+    #
+    # test          ExprNode
+    # cases         [SwitchCaseNode]
+    # else_clause   StatNode or None
+    
+    child_attrs = ['test', 'cases', 'else_clause']
+    
+    def generate_execution_code(self, code):
+        code.putln("switch (%s) {" % self.test.calculate_result_code())
+        for case in self.cases:
+            case.generate_execution_code(code)
+        if self.else_clause is not None:
+            code.putln("default:")
+            self.else_clause.generate_execution_code(code)
+        code.putln("}")
+
+    def annotate(self, code):
+        self.test.annotate(code)
+        for case in self.cases:
+            case.annotate(code)
+        self.else_clause.annotate(code)
+            
 class LoopNode:
     
     def analyse_control_flow(self, env):
