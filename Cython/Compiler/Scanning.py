@@ -209,8 +209,15 @@ class SourceDescriptor:
     """
     A SourceDescriptor should be considered immutable.
     """
+    _escaped_description = None
     def __str__(self):
         assert False # To catch all places where a descriptor is used directly as a filename
+    
+    def get_escaped_description(self):
+        if self._escaped_description is None:
+            self._escaped_description = \
+                self.get_description().encode('ASCII', 'replace').decode("ASCII")
+        return self._escaped_description
 
 class FileSourceDescriptor(SourceDescriptor):
     """
@@ -223,16 +230,8 @@ class FileSourceDescriptor(SourceDescriptor):
     def __init__(self, filename):
         self.filename = filename
     
-    def get_lines(self, decode=False):
-        # decode is True when called from Code.py (which reserializes in a standard way to ASCII),
-        # while decode is False when called from Errors.py.
-        #
-        # Note that if changing Errors.py in this respect, raising errors over wrong encoding
-        # will no longer be able to produce the line where the encoding problem occurs ...
-        if decode:
-            return Utils.open_source_file(self.filename)
-        else:
-            return open(self.filename)
+    def get_lines(self):
+        return Utils.open_source_file(self.filename)
     
     def get_description(self):
         return self.filename
@@ -258,7 +257,7 @@ class StringSourceDescriptor(SourceDescriptor):
         self.name = name
         self.codelines = [x + "\n" for x in code.split("\n")]
     
-    def get_lines(self, decode=False):
+    def get_lines(self):
         return self.codelines
     
     def get_description(self):
@@ -281,24 +280,26 @@ class StringSourceDescriptor(SourceDescriptor):
 class PyrexScanner(Scanner):
     #  context            Context  Compilation context
     #  type_names         set      Identifiers to be treated as type names
+    #  included_files     [string] Files included with 'include' statement
     #  compile_time_env   dict     Environment for conditional compilation
     #  compile_time_eval  boolean  In a true conditional compilation context
     #  compile_time_expr  boolean  In a compile-time expression context
-    
     resword_dict = build_resword_dict()
 
     def __init__(self, file, filename, parent_scanner = None, 
-            type_names = None, context = None, source_encoding=None):
+                 scope = None, context = None, source_encoding=None):
         Scanner.__init__(self, get_lexicon(), file, filename)
         if parent_scanner:
             self.context = parent_scanner.context
             self.type_names = parent_scanner.type_names
+            self.included_files = parent_scanner.included_files
             self.compile_time_env = parent_scanner.compile_time_env
             self.compile_time_eval = parent_scanner.compile_time_eval
             self.compile_time_expr = parent_scanner.compile_time_expr
         else:
             self.context = context
-            self.type_names = type_names
+            self.type_names = scope.type_names
+            self.included_files = scope.included_files
             self.compile_time_env = initial_compile_time_env()
             self.compile_time_eval = 1
             self.compile_time_expr = 0

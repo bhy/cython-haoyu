@@ -54,7 +54,7 @@ def parse_from_strings(name, code, pxds={}):
     buf = StringIO(code.encode(encoding))
 
     scanner = PyrexScanner(buf, code_source, source_encoding = encoding,
-                     type_names = scope.type_names, context = context)
+                     scope = scope, context = context)
     tree = Parsing.p_module(scanner, 0, module_name)
     return tree
 

@@ -40,6 +40,7 @@ class TempName(object):
         return cmp(id(self), id(other))
 
 possible_identifier = re.compile(ur"(?![0-9])\w+$", re.U).match
+nice_identifier = re.compile('^[a-zA-Z0-0_]+$').match
 
 class Entry:
     # A symbol table entry in a Scope or ModuleNamespace.
@@ -145,6 +146,9 @@ class Entry:
         self.pos = pos
         self.init = init
         
+    def redeclared(self, pos):
+        error(pos, "'%s' does not match previous declaration" % self.name)
+        error(self.pos, "Previous declaration is here")
         
 class Scope:
     # name              string             Unqualified name
@@ -173,12 +177,14 @@ class Scope:
     # pystring_entries  [Entry]            String const entries newly used as
     #                                        Python strings in this scope
     # control_flow     ControlFlow  Used for keeping track of environment state
+    # nogil             boolean            In a nogil section
 
     is_py_class_scope = 0
     is_c_class_scope = 0
     is_module_scope = 0
     scope_prefix = ""
     in_cinclude = 0
+    nogil = 0
     
     def __init__(self, name, outer_scope, parent_scope):
         # The outer_scope is the next scope in the lookup chain.
@@ -330,7 +336,8 @@ class Scope:
                 visibility = visibility, defining = scope is not None)
             self.sue_entries.append(entry)
         else:
-            if not (entry.is_type and entry.type.is_struct_or_union):
+            if not (entry.is_type and entry.type.is_struct_or_union
+                    and entry.type.kind == kind):
                 warning(pos, "'%s' redeclared  " % name, 0)
             elif scope and entry.type.scope:
                 warning(pos, "'%s' already defined  (ignoring second definition)" % name, 0)
@@ -390,6 +397,10 @@ class Scope:
     
     def declare_pyfunction(self, name, pos):
         # Add an entry for a Python function.
+        entry = self.lookup_here(name)
+        if entry and not entry.type.is_cfunction:
+            # This is legal Python, but for now will produce invalid C.
+            error(pos, "'%s' already declared" % name)
         entry = self.declare_var(name, py_object_type, pos)
         entry.signature = pyfunction_signature
         self.pyfunc_entries.append(entry)
@@ -440,6 +451,21 @@ class Scope:
         else:
             error(pos, "'%s' is not declared" % name)
     
+    def find_imported_module(self, path, pos):
+        # Look up qualified name, must be a module, report error if not found.
+        # Path is a list of names.
+        scope = self
+        for name in path:
+            entry = scope.find(name, pos)
+            if not entry:
+                return None
+            if entry.as_module:
+                scope = entry.as_module
+            else:
+                error(pos, "'%s' is not a cimported module" % scope.qualified_name)
+                return None
+        return scope
+        
     def lookup(self, name):
         # Look up name in this scope or an enclosing one.
         # Return None if not found.
@@ -459,9 +485,12 @@ class Scope:
             entry = self.declare_var(name, py_object_type, None)
         return entry
 
-    def add_string_const(self, value):
+    def add_string_const(self, value, identifier = False):
         # Add an entry for a string constant.
-        cname = self.new_const_cname()
+        if identifier:
+            cname = self.new_string_const_cname(value)
+        else:
+            cname = self.new_const_cname()
         if value.is_unicode:
             c_type = PyrexTypes.c_utf8_char_array_type
             value = value.utf8encode()
@@ -483,7 +512,7 @@ class Scope:
             string_map = genv.string_to_entry
         entry = string_map.get(value)
         if not entry:
-            entry = self.add_string_const(value)
+            entry = self.add_string_const(value, identifier)
             entry.is_identifier = identifier
             string_map[value] = entry
         return entry
@@ -496,7 +525,7 @@ class Scope:
         if entry.pystring_cname:
             return
         value = entry.init
-        entry.pystring_cname = entry.cname + "p"
+        entry.pystring_cname = Naming.py_const_prefix + entry.cname[len(Naming.const_prefix):]
         self.pystring_entries.append(entry)
         self.global_scope().all_pystring_entries.append(entry)
         if identifier or (identifier is None and possible_identifier(value)):
@@ -535,6 +564,13 @@ class Scope:
             genv.obj_to_entry[obj] = entry
         return entry
     
+    def new_string_const_cname(self, value):
+        # Create a new globally-unique nice name for a string constant.
+        if len(value) < 20 and nice_identifier(value):
+            return "%s%s" % (Naming.const_prefix, value)
+        else:
+            return self.global_scope().new_const_cname()
+
     def new_const_cname(self):
         # Create a new globally-unique name for a constant.
         return self.global_scope().new_const_cname()
@@ -577,10 +613,6 @@ class Scope:
         return [entry for entry in self.temp_entries
             if entry not in self.free_temp_entries]
     
-    #def recycle_pending_temps(self):
-    #	# Obsolete
-    #	pass
-
     def use_utility_code(self, new_code):
         self.global_scope().use_utility_code(new_code)
     
@@ -675,7 +707,7 @@ class BuiltinScope(Scope):
         "long":   ["((PyObject*)&PyLong_Type)", py_object_type],
         "float":  ["((PyObject*)&PyFloat_Type)", py_object_type],
         
-        "str":    ["((PyObject*)&PyString_Type)", py_object_type],
+        "str":    ["((PyObject*)&PyBytes_Type)", py_object_type],
         "unicode":["((PyObject*)&PyUnicode_Type)", py_object_type],
         "tuple":  ["((PyObject*)&PyTuple_Type)", py_object_type],
         "list":   ["((PyObject*)&PyList_Type)", py_object_type],
@@ -710,6 +742,7 @@ class ModuleScope(Scope):
     # parent_module        Scope              Parent in the import namespace
     # module_entries       {string : Entry}   For cimport statements
     # type_names           {string : 1}       Set of type names (used during parsing)
+    # included_files       [string]           Cython sources included with 'include'
     # pxd_file_loaded      boolean            Corresponding .pxd file has been processed
     # cimported_modules    [ModuleScope]      Modules imported with cimport
     # new_interned_string_entries [Entry]     New interned strings waiting to be declared
@@ -746,6 +779,7 @@ class ModuleScope(Scope):
         self.interned_objs = []
         self.all_pystring_entries = []
         self.types_imported = {}
+        self.included_files = []
         self.pynum_entries = []
         self.has_extern_class = 0
         self.cached_builtins = []
@@ -889,7 +923,7 @@ class ModuleScope(Scope):
         prefix=''
         n = self.const_counter
         self.const_counter = n + 1
-        return "%s%s_%d" % (Naming.const_prefix, prefix, n)
+        return "%s%s%d" % (Naming.const_prefix, prefix, n)
     
     def use_utility_code(self, new_code):
         #  Add string to list of utility code to be included,
@@ -899,23 +933,28 @@ class ModuleScope(Scope):
                 return
         self.utility_code_used.append(new_code)
     
-    def declare_c_class(self, name, pos, defining, implementing,
-        module_name, base_type, objstruct_cname, typeobj_cname,
-        visibility, typedef_flag, api):
+    def declare_c_class(self, name, pos, defining = 0, implementing = 0,
+        module_name = None, base_type = None, objstruct_cname = None,
+        typeobj_cname = None, visibility = 'private', typedef_flag = 0, api = 0):
         #
-        # Look for previous declaration as a type
+        #  Look for previous declaration as a type
         #
         entry = self.lookup_here(name)
         if entry:
             type = entry.type
             if not (entry.is_type and type.is_extension_type):
-                entry = None # Will cause an error when we redeclare it
+                entry = None # Will cause redeclaration and produce an error
             else:
-                self.check_previous_typedef_flag(entry, typedef_flag, pos)
-                if base_type != type.base_type:
-                    error(pos, "Base type does not match previous declaration")
+                scope = type.scope
+                if typedef_flag and (not scope or scope.defined):
+                    self.check_previous_typedef_flag(entry, typedef_flag, pos)
+                if (scope and scope.defined) or (base_type and type.base_type):
+                    if base_type and base_type is not type.base_type:
+                        error(pos, "Base type does not match previous declaration")
+                if base_type and not type.base_type:
+                    type.base_type = base_type
         #
-        # Make a new entry if needed
+        #  Make a new entry if needed
         #
         if not entry:
             type = PyrexTypes.PyExtensionType(name, typedef_flag, base_type)
@@ -937,7 +976,7 @@ class ModuleScope(Scope):
             self.attach_var_entry_to_c_class(entry)
             self.c_class_entries.append(entry)
         #
-        # Check for re-definition and create scope if needed
+        #  Check for re-definition and create scope if needed
         #
         if not type.scope:
             if defining or implementing:
@@ -955,7 +994,7 @@ class ModuleScope(Scope):
             elif implementing and type.scope.implemented:
                 error(pos, "C class '%s' already implemented" % name)
         #
-        # Fill in options, checking for compatibility with any previous declaration
+        #  Fill in options, checking for compatibility with any previous declaration
         #
         if defining:
             entry.defined_in_pxd = 1
@@ -1152,8 +1191,8 @@ class ClassScope(Scope):
         self.class_name = name
         self.doc = None
 
-    def add_string_const(self, value):
-        return self.outer_scope.add_string_const(value)
+    def add_string_const(self, value, identifier = False):
+        return self.outer_scope.add_string_const(value, identifier)
 
     def lookup(self, name):
         if name == "classmethod":
@@ -1334,9 +1373,9 @@ class CClassScope(ClassScope):
                 if defining and entry.func_cname:
                     error(pos, "'%s' already defined" % name)
                 #print "CClassScope.declare_cfunction: checking signature" ###
-                if type.same_c_signature_as(entry.type, as_cmethod = 1):
+                if type.same_c_signature_as(entry.type, as_cmethod = 1) and type.nogil == entry.type.nogil:
                     pass
-                elif type.compatible_signature_with(entry.type, as_cmethod = 1):
+                elif type.compatible_signature_with(entry.type, as_cmethod = 1) and type.nogil == entry.type.nogil:
                     if type.optional_arg_count and not type.original_sig.optional_arg_count:
                         # Need to put a wrapper taking no optional arguments 
                         # into the method table.
@@ -1355,6 +1394,7 @@ class CClassScope(ClassScope):
 #                    entry.type = type
                 else:
                     error(pos, "Signature not compatible with previous declaration")
+                    error(entry.pos, "Previous declaration is here")
         else:
             if self.defined:
                 error(pos,
@@ -1394,8 +1434,8 @@ class CClassScope(ClassScope):
                 entry.is_variable = 1
                 self.inherited_var_entries.append(entry)
         for base_entry in base_scope.cfunc_entries:
-            entry = self.add_cfunction(base_entry.name, base_entry.type, None,
-                adapt(base_entry.cname), base_entry.visibility)
+            entry = self.add_cfunction(base_entry.name, base_entry.type,
+                    base_entry.pos, adapt(base_entry.cname), base_entry.visibility)
             entry.is_inherited = 1
             
     def allocate_temp(self, type):

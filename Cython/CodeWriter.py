@@ -1,5 +1,6 @@
 from Cython.Compiler.Visitor import TreeVisitor
 from Cython.Compiler.Nodes import *
+from Cython.Compiler.Symtab import TempName
 
 """
 Serializes a Cython code tree to Cython code. This is primarily useful for

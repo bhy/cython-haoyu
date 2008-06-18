@@ -17,17 +17,23 @@ def context(position):
     source = position[0]
     assert not (isinstance(source, unicode) or isinstance(source, str)), (
         "Please replace filename strings with Scanning.FileSourceDescriptor instances %r" % source)
-    F = list(source.get_lines())
-    s = ''.join(F[min(0, position[1]-6):position[1]])
-    s += ' '*(position[2]-1) + '^'
-    s = '-'*60 + '\n...\n' + s + '\n' + '-'*60 + '\n'
+    try:
+        F = list(source.get_lines())
+    except UnicodeDecodeError:
+        # file has an encoding problem
+        s = "[unprintable code]\n"
+    else:
+        s =''.join(F[max(0, position[1]-6):position[1]])
+        s = '...\n' + s + ' '*(position[2]-1) + '^\n'
+    s = '-'*60 + '\n' + s + '-'*60 + '\n'
     return s
     
 class CompileError(PyrexError):
     
     def __init__(self, position = None, message = ""):
         self.position = position
-        self.message = message
+    # Deprecated and withdrawn in 2.6:
+    #   self.message = message
         if position:
             pos_str = "%s:%d:%d: " % (position[0].get_description(), position[1], position[2])
             cont = context(position)
@@ -40,7 +46,8 @@ class CompileWarning(PyrexWarning):
     
     def __init__(self, position = None, message = ""):
         self.position = position
-        self.message = message
+    # Deprecated and withdrawn in 2.6:
+    #   self.message = message
         if position:
             pos_str = "%s:%d:%d: " % (position[0].get_description(), position[1], position[2])
         else:

@@ -24,14 +24,21 @@ def castrate_file(path, st):
     except EnvironmentError:
         pass
     else:
-        #st = os.stat(path)
         f.seek(0, 0)
         f.truncate()
         f.write(
             "#error Do not use this file, it is the result of a failed Cython compilation.\n")
         f.close()
         if st:
-            os.utime(path, (st.st_atime, st.st_mtime))
+            os.utime(path, (st.st_atime, st.st_mtime-1))
+
+def modification_time(path):
+    st = os.stat(path)
+    return st.st_mtime
+
+def file_newer_than(path, time):
+    ftime = modification_time(path)
+    return ftime > time
 
 # support for source file encoding detection and unicode decoding
 

@@ -54,6 +54,8 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
         if self.has_imported_c_functions():
             self.module_temp_cname = env.allocate_temp_pyobject()
             env.release_temp(self.module_temp_cname)
+        if options.recursive:
+            self.generate_dep_file(env, result)
         self.generate_c_code(env, options, result)
         self.generate_h_code(env, options, result)
         self.generate_api_code(env, result)
@@ -65,6 +67,20 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
                     return 1
         return 0
     
+    def generate_dep_file(self, env, result):
+        modules = self.referenced_modules
+        if len(modules) > 1 or env.included_files:
+            dep_file = replace_suffix(result.c_file, ".dep")
+            f = open(dep_file, "w")
+            try:
+                for module in modules:
+                    if module is not env:
+                        f.write("cimport %s\n" % module.qualified_name)
+                    for path in module.included_files:
+                        f.write("include %s\n" % path)
+            finally:
+                f.close()
+
     def generate_h_code(self, env, options, result):
         def h_entries(entries, pxd = 0):
             return [entry for entry in entries
@@ -232,6 +248,7 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
         self.generate_filename_init_prototype(code)
         if env.has_import_star:
             self.generate_import_star(env, code)
+        self.generate_pymoduledef_struct(env, code)
         self.generate_module_init_func(modules[:-1], env, code)
         code.mark_pos(None)
         self.generate_module_cleanup_func(env, code)
@@ -348,12 +365,14 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
 
     def generate_declarations_for_modules(self, env, modules, code):
         code.putln("")
-        code.putln("/* Declarations */")
+        code.putln("/* Type declarations */")
         vtab_list, vtabslot_list = self.sort_type_hierarchy(modules, env)
         self.generate_type_definitions(
             env, modules, vtab_list, vtabslot_list, code)
         for module in modules:
             defined_here = module is env
+            code.putln("/* Module declarations from %s */" %
+                       module.qualified_name.encode("ASCII", "ignore"))
             self.generate_global_declarations(module, code, defined_here)
             self.generate_cfunction_predeclarations(module, code, defined_here)
 
@@ -440,6 +459,8 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
         code.putln("  #define PyInt_AsUnsignedLongMask     PyLong_AsUnsignedLongMask")
         code.putln("  #define PyInt_AsUnsignedLongLongMask PyLong_AsUnsignedLongLongMask")
         code.putln("  #define PyNumber_Divide(x,y)         PyNumber_TrueDivide(x,y)")
+        code.putln("#else")
+        code.putln("  #define PyBytes_Type                 PyString_Type")
         code.putln("#endif")
 
         code.putln("#if PY_MAJOR_VERSION >= 3")
@@ -454,6 +475,7 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
         code.putln("#endif")
         self.generate_extern_c_macro_definition(code)
         code.putln("#include <math.h>")
+        code.putln("#define %s" % Naming.api_guard_prefix + self.api_name(env))
         self.generate_includes(env, cimported_modules, code)
         code.putln('')
         code.put(Nodes.utility_function_predeclarations)
@@ -467,9 +489,9 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
             code.putln('static PyObject *%s;' % Naming.preimport_cname)
         code.putln('static int %s;' % Naming.lineno_cname)
         code.putln('static int %s = 0;' % Naming.clineno_cname)
-        code.putln('static char * %s= %s;' % (Naming.cfilenm_cname, Naming.file_c_macro))
-        code.putln('static char *%s;' % Naming.filename_cname)
-        code.putln('static char **%s;' % Naming.filetable_cname)
+        code.putln('static const char * %s= %s;' % (Naming.cfilenm_cname, Naming.file_c_macro))
+        code.putln('static const char *%s;' % Naming.filename_cname)
+        code.putln('static const char **%s;' % Naming.filetable_cname)
         if env.doc:
             code.putln('')
             code.putln('static char %s[] = "%s";' % (env.doc_cname, env.doc))
@@ -493,7 +515,7 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
     
     def generate_filename_table(self, code):
         code.putln("")
-        code.putln("static char *%s[] = {" % Naming.filenames_cname)
+        code.putln("static const char *%s[] = {" % Naming.filenames_cname)
         if code.filename_list:
             for source_desc in code.filename_list:
                 filename = os.path.basename(source_desc.get_filenametable_entry())
@@ -686,8 +708,9 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
                     entry.type.typeptr_cname)
         code.put_var_declarations(env.var_entries, static = 1, 
             dll_linkage = "DL_EXPORT", definition = definition)
-        code.put_var_declarations(env.default_entries, static = 1,
-                                  definition = definition)
+        if definition:
+            code.put_var_declarations(env.default_entries, static = 1,
+                                      definition = definition)
     
     def generate_cfunction_predeclarations(self, env, code, definition):
         for entry in env.cfunc_entries:
@@ -799,10 +822,13 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
         #if need_self_cast:
         #	self.generate_self_cast(scope, code)
         if type.vtabslot_cname:
-            code.putln("*(struct %s **)&p->%s = %s;" % (
-                type.vtabstruct_cname,
+            if base_type:
+                struct_type_cast = "(struct %s*)" % base_type.vtabstruct_cname
+            else:
+                struct_type_cast = ""
+            code.putln("p->%s = %s%s;" % (
                 type.vtabslot_cname,
-                type.vtabptr_cname))
+                struct_type_cast, type.vtabptr_cname))
         for entry in py_attrs:
             if entry.name == "__weakref__":
                 code.putln("p->%s = 0;" % entry.cname)
@@ -1495,9 +1521,17 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
 
     def generate_module_init_func(self, imported_modules, env, code):
         code.putln("")
-        header = "PyMODINIT_FUNC init%s(void)" % env.module_name
-        code.putln("%s; /*proto*/" % header)
-        code.putln("%s {" % header)
+        header2 = "PyMODINIT_FUNC init%s(void)" % env.module_name
+        header3 = "PyMODINIT_FUNC PyInit_%s(void)" % env.module_name
+        code.putln("#if PY_MAJOR_VERSION < 3")
+        code.putln("%s; /*proto*/" % header2)
+        code.putln(header2)
+        code.putln("#else")
+        code.putln("%s; /*proto*/" % header3)
+        code.putln(header3)
+        code.putln("#endif")
+        code.putln("{")
+
         code.put_var_declarations(env.temp_entries)
         code.putln("%s = PyTuple_New(0); %s" % (Naming.empty_tuple, code.error_goto_if_null(Naming.empty_tuple, self.pos)));
 
@@ -1542,13 +1576,21 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
         self.body.generate_execution_code(code)
 
         if Options.generate_cleanup_code:
+            # this should be replaced by the module's tp_clear in Py3
             code.putln("if (__Pyx_RegisterCleanup()) %s;" % code.error_goto(self.pos))
 
+        code.putln("#if PY_MAJOR_VERSION < 3")
         code.putln("return;")
+        code.putln("#else")
+        code.putln("return %s;" % env.module_cname)
+        code.putln("#endif")
         code.put_label(code.error_label)
         code.put_var_xdecrefs(env.temp_entries)
         code.putln('__Pyx_AddTraceback("%s");' % env.qualified_name)
         env.use_utility_code(Nodes.traceback_utility_code)
+        code.putln("#if PY_MAJOR_VERSION >= 3")
+        code.putln("return NULL;")
+        code.putln("#endif")
         code.putln('}')
 
     def generate_module_cleanup_func(self, env, code):
@@ -1588,7 +1630,27 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
 
     def generate_filename_init_call(self, code):
         code.putln("%s();" % Naming.fileinit_cname)
-    
+
+    def generate_pymoduledef_struct(self, env, code):
+        if env.doc:
+            doc = env.doc_cname
+        else:
+            doc = "0"
+        code.putln("")
+        code.putln("#if PY_MAJOR_VERSION >= 3")
+        code.putln("static struct PyModuleDef %s = {" % Naming.pymoduledef_cname)
+        code.putln("  PyModuleDef_HEAD_INIT,")
+        code.putln('  "%s",' % env.module_name)
+        code.putln("  %s, /* m_doc */" % doc)
+        code.putln("  -1, /* m_size */")
+        code.putln("  %s /* m_methods */," % env.method_table_cname)
+        code.putln("  NULL, /* m_reload */")
+        code.putln("  NULL, /* m_traverse */")
+        code.putln("  NULL, /* m_clear */")
+        code.putln("  NULL /* m_free */")
+        code.putln("};")
+        code.putln("#endif")
+
     def generate_module_creation_code(self, env, code):
         # Generate code to create the module object and
         # install the builtins.
@@ -1596,19 +1658,28 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
             doc = env.doc_cname
         else:
             doc = "0"
+        code.putln("#if PY_MAJOR_VERSION < 3")
         code.putln(
             '%s = Py_InitModule4("%s", %s, %s, 0, PYTHON_API_VERSION);' % (
                 env.module_cname, 
                 env.module_name, 
                 env.method_table_cname, 
                 doc))
+        code.putln("#else")
+        code.putln(
+            "%s = PyModule_Create(&%s);" % (
+                env.module_cname,
+                Naming.pymoduledef_cname))
+        code.putln("#endif")
         code.putln(
             "if (!%s) %s;" % (
                 env.module_cname,
                 code.error_goto(self.pos)));
+        code.putln("#if PY_MAJOR_VERSION < 3")
         code.putln(
             "Py_INCREF(%s);" %
                 env.module_cname)
+        code.putln("#endif")
         code.putln(
             '%s = PyImport_AddModule(__Pyx_BUILTIN_MODULE_NAME);' %
                 Naming.builtins_cname)
@@ -2124,8 +2195,13 @@ __Pyx_import_all_from(PyObject *locals, PyObject *v)
 			break;
 		}
 		if (skip_leading_underscores &&
+#if PY_MAJOR_VERSION < 3
 		    PyString_Check(name) &&
 		    PyString_AS_STRING(name)[0] == '_')
+#else
+		    PyUnicode_Check(name) &&
+		    PyUnicode_AS_UNICODE(name)[0] == '_')
+#endif
 		{
 			Py_DECREF(name);
 			continue;
@@ -2147,10 +2223,11 @@ __Pyx_import_all_from(PyObject *locals, PyObject *v)
 }
 
 
-static int %s(PyObject* m) {
+static int %(IMPORT_STAR)s(PyObject* m) {
 
     int i;
     int ret = -1;
+    char* s;
     PyObject *locals = 0;
     PyObject *list = 0;
     PyObject *name;
@@ -2163,7 +2240,13 @@ static int %s(PyObject* m) {
     for(i=0; i<PyList_GET_SIZE(list); i++) {
         name = PyTuple_GET_ITEM(PyList_GET_ITEM(list, i), 0);
         item = PyTuple_GET_ITEM(PyList_GET_ITEM(list, i), 1);
-        if (%s(item, name, PyString_AsString(name)) < 0) goto bad;
+#if PY_MAJOR_VERSION < 3
+        s = PyString_AsString(name);
+#else
+        s = PyUnicode_AsString(name);
+#endif
+        if (!s) goto bad;
+        if (%(IMPORT_STAR_SET)s(item, name, s) < 0) goto bad;
     }
     ret = 0;
     
@@ -2172,4 +2255,5 @@ bad:
     Py_XDECREF(list);
     return ret;
 }
-""" % ( Naming.import_star, Naming.import_star_set )
+""" % {'IMPORT_STAR'     : Naming.import_star,
+       'IMPORT_STAR_SET' : Naming.import_star_set }

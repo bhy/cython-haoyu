@@ -606,14 +606,18 @@ class CPtrType(CType):
     def assignable_from_resolved_type(self, other_type):
         if other_type is error_type:
             return 1
-        elif other_type.is_null_ptr:
+        if other_type.is_null_ptr:
             return 1
-        elif self.base_type.is_cfunction and other_type.is_cfunction:
-            return self.base_type.same_as(other_type)
-        elif other_type.is_array or other_type.is_ptr:
+        if self.base_type.is_cfunction:
+            if other_type.is_ptr:
+                other_type = other_type.base_type.resolve()
+            if other_type.is_cfunction:
+                return self.base_type.pointer_assignable_from_resolved_type(other_type)
+            else:
+                return 0
+        if other_type.is_array or other_type.is_ptr:
             return self.base_type.is_void or self.base_type.same_as(other_type.base_type)
-        else:
-            return 0
+        return 0
 
 
 class CNullPtrType(CPtrType):
@@ -668,7 +672,7 @@ class CFuncType(CType):
         return self.same_c_signature_as_resolved_type(
             other_type.resolve(), as_cmethod)
 
-    def same_c_signature_as_resolved_type(self, other_type, as_cmethod):
+    def same_c_signature_as_resolved_type(self, other_type, as_cmethod = 0):
         #print "CFuncType.same_c_signature_as_resolved_type:", \
         #	self, other_type, "as_cmethod =", as_cmethod ###
         if other_type is error_type:
@@ -696,8 +700,7 @@ class CFuncType(CType):
         if not self.same_calling_convention_as(other_type):
             return 0
         return 1
-        
-    
+
     def compatible_signature_with(self, other_type, as_cmethod = 0):
         return self.compatible_signature_with_resolved_type(other_type.resolve(), as_cmethod)
     
@@ -727,6 +730,8 @@ class CFuncType(CType):
         if not self.return_type.subtype_of_resolved_type(other_type.return_type):
             return 0
         if not self.same_calling_convention_as(other_type):
+            return 0
+        if self.nogil != other_type.nogil:
             return 0
         self.original_sig = other_type.original_sig or other_type
         if as_cmethod:
@@ -774,7 +779,13 @@ class CFuncType(CType):
     
     def same_as_resolved_type(self, other_type, as_cmethod = 0):
         return self.same_c_signature_as_resolved_type(other_type, as_cmethod) \
-            and self.same_exception_signature_as_resolved_type(other_type)
+            and self.same_exception_signature_as_resolved_type(other_type) \
+            and self.nogil == other_type.nogil
+    
+    def pointer_assignable_from_resolved_type(self, other_type):
+        return self.same_c_signature_as_resolved_type(other_type) \
+            and self.same_exception_signature_as_resolved_type(other_type) \
+            and not (self.nogil and not other_type.nogil)
     
     def declaration_code(self, entity_code, 
             for_display = 0, dll_linkage = None, pyrex = 0):
@@ -789,22 +800,24 @@ class CFuncType(CType):
         arg_decl_code = ", ".join(arg_decl_list)
         if not arg_decl_code and not pyrex:
             arg_decl_code = "void"
-        exc_clause = ""
+        trailer = ""
         if (pyrex or for_display) and not self.return_type.is_pyobject:
             if self.exception_value and self.exception_check:
-                exc_clause = " except? %s" % self.exception_value
+                trailer = " except? %s" % self.exception_value
             elif self.exception_value:
-                exc_clause = " except %s" % self.exception_value
+                trailer = " except %s" % self.exception_value
             elif self.exception_check == '+':
-                exc_clause = " except +"
+                trailer = " except +"
             else:
-                " except *"
+                " except *" # ignored
+            if self.nogil:
+                trailer += " nogil"
         cc = self.calling_convention_prefix()
         if (not entity_code and cc) or entity_code.startswith("*"):
             entity_code = "(%s%s)" % (cc, entity_code)
             cc = ""
         return self.return_type.declaration_code(
-            "%s%s(%s)%s" % (cc, entity_code, arg_decl_code, exc_clause),
+            "%s%s(%s)%s" % (cc, entity_code, arg_decl_code, trailer),
             for_display, dll_linkage, pyrex)
 	
     def function_header_code(self, func_name, arg_code):

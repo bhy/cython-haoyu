@@ -8,6 +8,14 @@ __doc__ = u"""
     1
 """
 
+import sys
+if sys.version_info[0] < 3:
+    __doc__ = __doc__ + u"""
+
+    >>> modptr()
+    'spameggs'
+"""
+
 def modobj(obj2, obj3):
     obj1 = obj2 % obj3
     return obj1
@@ -17,11 +25,10 @@ def modint(int int2, int int3):
     int1 = int2 % int3
     return int1
 
-cdef modptr():
-    # FIXME!!!
+def modptr():
     cdef char *str2, *str3
-    str2 = "spam"
+    str2 = "spam%s"
     str3 = "eggs"
 
-    obj1 = str2 % str3
+    obj1 = str2 % str3 # '%' operator doesn't work on byte strings in Py3
     return obj1
