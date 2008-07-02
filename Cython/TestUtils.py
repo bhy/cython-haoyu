@@ -27,6 +27,15 @@ class NodeTypeWriter(TreeVisitor):
         self.visitchildren(node)
         self._indents -= 1
 
+def treetypes(root):
+    """Returns a string representing the tree by class names.
+    There's a leading and trailing whitespace so that it can be
+    compared by simple string comparison while still making test
+    cases look ok."""
+    w = NodeTypeWriter()
+    w.visit(root)
+    return u"\n".join([u""] + w.result + [u""])
+
 class CythonTest(unittest.TestCase):
 
     def assertLines(self, expected, result):
@@ -58,13 +67,7 @@ class CythonTest(unittest.TestCase):
         return TreeFragment(code, name, pxds, pipeline=pipeline)
 
     def treetypes(self, root):
-        """Returns a string representing the tree by class names.
-        There's a leading and trailing whitespace so that it can be
-        compared by simple string comparison while still making test
-        cases look ok."""
-        w = NodeTypeWriter()
-        w.visit(root)
-        return u"\n".join([u""] + w.result + [u""])
+        return treetypes(root)
 
     def should_fail(self, func, exc_type=Exception):
         """Calls "func" and fails if it doesn't raise the right exception

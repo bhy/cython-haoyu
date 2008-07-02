@@ -65,14 +65,14 @@ class TestBufferOptions(CythonTest):
         
     def test_basic(self):
         buf = self.parse_opts(u"unsigned short int, 3")
-        self.assert_(isinstance(buf.dtype, CSimpleBaseTypeNode))
-        self.assert_(buf.dtype.signed == 0 and buf.dtype.longness == -1)
+        self.assert_(isinstance(buf.dtype_node, CSimpleBaseTypeNode))
+        self.assert_(buf.dtype_node.signed == 0 and buf.dtype_node.longness == -1)
         self.assertEqual(3, buf.ndim)
 
     def test_dict(self):
         buf = self.parse_opts(u"ndim=3, dtype=unsigned short int")
-        self.assert_(isinstance(buf.dtype, CSimpleBaseTypeNode))
-        self.assert_(buf.dtype.signed == 0 and buf.dtype.longness == -1)
+        self.assert_(isinstance(buf.dtype_node, CSimpleBaseTypeNode))
+        self.assert_(buf.dtype_node.signed == 0 and buf.dtype_node.longness == -1)
         self.assertEqual(3, buf.ndim)
         
     def test_dtype(self):

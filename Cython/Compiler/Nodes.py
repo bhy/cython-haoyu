@@ -10,7 +10,7 @@ import Naming
 import PyrexTypes
 import TypeSlots
 from PyrexTypes import py_object_type, error_type, CTypedefType, CFuncType
-from Symtab import ModuleScope, LocalScope, \
+from Symtab import ModuleScope, LocalScope, GeneratorLocalScope, \
     StructOrUnionScope, PyClassScope, CClassScope
 from Cython.Utils import open_new_file, replace_suffix, EncodedString
 import Options
@@ -607,15 +607,29 @@ class CSimpleBaseTypeNode(CBaseTypeNode):
             return PyrexTypes.error_type
 
 class CBufferAccessTypeNode(Node):
-    #  base_type_node   CBaseTypeNode
+    #  After parsing:
     #  positional_args  [ExprNode]        List of positional arguments
     #  keyword_args     DictNode          Keyword arguments
+    #  base_type_node   CBaseTypeNode
 
-    child_attrs = ["base_type_node", "positional_args", "keyword_args"]
+    #  After PostParse:
+    #  dtype_node       CBaseTypeNode
+    #  ndim             int
+
+    #  After analysis:
+    #  type             PyrexType.PyrexType
+
+    child_attrs = ["base_type_node", "positional_args", "keyword_args",
+                   "dtype_node"]
+
+    dtype_node = None
     
     def analyse(self, env):
-        
-        return self.base_type_node.analyse(env)
+        base_type = self.base_type_node.analyse(env)
+        dtype = self.dtype_node.analyse(env)
+        options = PyrexTypes.BufferOptions(dtype=dtype, ndim=self.ndim)
+        self.type = PyrexTypes.create_buffer_type(base_type, options)
+        return self.type
 
 class CComplexBaseTypeNode(CBaseTypeNode):
     # base_type   CBaseTypeNode
@@ -802,9 +816,11 @@ class FuncDefNode(StatNode, BlockNode):
     #  return_type     PyrexType
     #  #filename        string        C name of filename string const
     #  entry           Symtab.Entry
+    #  needs_closure   boolean        Whether or not this function has inner functions/classes/yield
     
     py_func = None
     assmt = None
+    needs_closure = False
     
     def analyse_default_values(self, env):
         genv = env.global_scope()
@@ -836,7 +852,10 @@ class FuncDefNode(StatNode, BlockNode):
         genv = env
         while env.is_py_class_scope or env.is_c_class_scope:
             env = env.outer_scope
-        lenv = LocalScope(name = self.entry.name, outer_scope = genv)
+        if self.needs_closure:
+            lenv = GeneratorLocalScope(name = self.entry.name, outer_scope = genv)
+        else:
+            lenv = LocalScope(name = self.entry.name, outer_scope = genv)
         lenv.return_type = self.return_type
         type = self.entry.type
         if type.is_cfunction:
@@ -866,7 +885,10 @@ class FuncDefNode(StatNode, BlockNode):
         self.generate_function_header(code,
             with_pymethdef = env.is_py_class_scope)
         # ----- Local variable declarations
+        lenv.mangle_closure_cnames(Naming.cur_scope_cname)
         self.generate_argument_declarations(lenv, code)
+        if self.needs_closure:
+            code.putln("/* TODO: declare and create scope object */")
         code.put_var_declarations(lenv.var_entries)
         init = ""
         if not self.return_type.is_void:
@@ -947,6 +969,7 @@ class FuncDefNode(StatNode, BlockNode):
         self.put_stararg_decrefs(code)
         if acquire_gil:
             code.putln("PyGILState_Release(_save);")
+        code.putln("/* TODO: decref scope object */")
         # ----- Return
         if not self.return_type.is_void:
             code.putln("return %s;" % Naming.retval_cname)
@@ -1912,9 +1935,10 @@ class OverrideCheckNode(StatNode):
 #        code.put_decref(self.func_temp, PyrexTypes.py_object_type)
         code.putln("}")
 
+class ClassDefNode(StatNode, BlockNode):
+    pass
 
-
-class PyClassDefNode(StatNode, BlockNode):
+class PyClassDefNode(ClassDefNode):
     #  A Python class definition.
     #
     #  name     EncodedString   Name of the class
@@ -1986,7 +2010,7 @@ class PyClassDefNode(StatNode, BlockNode):
         self.dict.generate_disposal_code(code)
 
 
-class CClassDefNode(StatNode, BlockNode):
+class CClassDefNode(ClassDefNode):
     #  An extension type definition.
     #
     #  visibility         'private' or 'public' or 'extern'

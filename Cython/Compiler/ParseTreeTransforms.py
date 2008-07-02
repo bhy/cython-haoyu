@@ -1,11 +1,11 @@
 from Cython.Compiler.Visitor import VisitorTransform, temp_name_handle, CythonTransform
+from Cython.Compiler.ModuleNode import ModuleNode
 from Cython.Compiler.Nodes import *
 from Cython.Compiler.ExprNodes import *
 from Cython.Compiler.TreeFragment import TreeFragment
 from Cython.Utils import EncodedString
 from Cython.Compiler.Errors import CompileError
 from sets import Set as set
-
 
 class NormalizeTree(CythonTransform):
     """
@@ -124,7 +124,7 @@ class PostParse(CythonTransform):
         # get dtype
         dtype = options.get("dtype")
         if dtype is None: raise PostParseError(node.pos, ERR_BUF_MISSING % 'dtype')
-        node.dtype = dtype
+        node.dtype_node = dtype
 
         # get ndim
         if "ndim" in provided:
@@ -142,8 +142,6 @@ class PostParse(CythonTransform):
         node.positional_args = None
         node.keyword_args = None
         return node
-
-
 
 class WithTransform(CythonTransform):
 
@@ -233,7 +231,6 @@ class AnalyseDeclarationsTransform(CythonTransform):
         return node
         
 class AnalyseExpressionsTransform(CythonTransform):
-
     def visit_ModuleNode(self, node):
         node.body.analyse_expressions(node.scope)
         self.visitchildren(node)
@@ -242,6 +239,52 @@ class AnalyseExpressionsTransform(CythonTransform):
     def visit_FuncDefNode(self, node):
         node.body.analyse_expressions(node.local_scope)
         self.visitchildren(node)
+        return node
+        
+class MarkClosureVisitor(CythonTransform):
+    
+    needs_closure = False
+    
+    def visit_FuncDefNode(self, node):
+        self.needs_closure = False
+        self.visitchildren(node)
+        node.needs_closure = self.needs_closure
+        self.needs_closure = True
+        return node
+        
+    def visit_ClassDefNode(self, node):
+        self.visitchildren(node)
+        self.needs_closure = True
+        return node
+        
+    def visit_YieldNode(self, node):
+        self.needs_closure = True
+        
+class CreateClosureClasses(CythonTransform):
+    # Output closure classes in module scope for all functions
+    # that need it. 
+    
+    def visit_ModuleNode(self, node):
+        self.module_scope = node.scope
+        self.visitchildren(node)
+        return node
+
+    def create_class_from_scope(self, node, target_module_scope):
+        as_name = temp_name_handle("closure")
+        func_scope = node.local_scope
+
+        entry = target_module_scope.declare_c_class(name = as_name,
+            pos = node.pos, defining = True, implementing = True)
+        class_scope = entry.type.scope
+        for entry in func_scope.entries.values():
+            class_scope.declare_var(pos=node.pos,
+                                    name=entry.name,
+                                    cname=entry.cname,
+                                    type=entry.type,
+                                    is_cdef=True)
+            
+    def visit_FuncDefNode(self, node):
+        self.create_class_from_scope(node, self.module_scope)
         return node
         
 
