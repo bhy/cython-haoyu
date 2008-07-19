@@ -809,6 +809,13 @@ class NameNode(AtomicExprNode):
     #  interned_cname  string
     
     is_name = 1
+
+    def create_analysed_rvalue(pos, env, entry):
+        node = NameNode(pos)
+        node.analyse_types(env, entry=entry)
+        return node
+    
+    create_analysed_rvalue = staticmethod(create_analysed_rvalue)
     
     def compile_time_value(self, denv):
         try:
@@ -862,8 +869,10 @@ class NameNode(AtomicExprNode):
         if self.entry.is_pyglobal and self.entry.is_member:
             env.use_utility_code(type_cache_invalidation_code)
     
-    def analyse_types(self, env):
-        self.entry = env.lookup(self.name)
+    def analyse_types(self, env, entry=None):
+        if entry is None:
+            entry = env.lookup(self.name)
+        self.entry = entry
         if not self.entry:
             self.entry = env.declare_builtin(self.name, self.pos)
         if not self.entry:
@@ -1302,12 +1311,12 @@ class IndexNode(ExprNode):
 
         skip_child_analysis = False
         buffer_access = False
-        if self.base.type.buffer_options is not None:
+        if self.base.type.is_buffer:
             if isinstance(self.index, TupleNode):
                 indices = self.index.args
             else:
                 indices = [self.index]
-            if len(indices) == self.base.type.buffer_options.ndim:
+            if len(indices) == self.base.type.ndim:
                 buffer_access = True
                 skip_child_analysis = True
                 for x in indices:
@@ -1320,7 +1329,7 @@ class IndexNode(ExprNode):
                     # for x in  indices]
                     self.indices = indices
                     self.index = None
-                    self.type = self.base.type.buffer_options.dtype 
+                    self.type = self.base.type.dtype 
                     self.is_temp = 1
                     self.is_buffer_access = True
             
