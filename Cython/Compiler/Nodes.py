@@ -251,6 +251,11 @@ class StatListNode(Node):
     # stats     a list of StatNode
     
     child_attrs = ["stats"]
+
+    def create_analysed(pos, env, *args, **kw):
+        node = StatListNode(pos, *args, **kw)
+        return node # No node-specific analysis necesarry
+    create_analysed = staticmethod(create_analysed)
     
     def analyse_control_flow(self, env):
         for stat in self.stats:
@@ -629,8 +634,7 @@ class CBufferAccessTypeNode(Node):
     def analyse(self, env):
         base_type = self.base_type_node.analyse(env)
         dtype = self.dtype_node.analyse(env)
-        options = PyrexTypes.BufferOptions(dtype=dtype, ndim=self.ndim)
-        self.type = PyrexTypes.create_buffer_type(base_type, options)
+        self.type = PyrexTypes.BufferType(base_type, dtype=dtype, ndim=self.ndim)
         return self.type
 
 class CComplexBaseTypeNode(CBaseTypeNode):
@@ -3523,6 +3527,12 @@ class TryFinallyStatNode(StatNode):
     # There doesn't seem to be any point in disallowing
     # continue in the try block, since we have no problem
     # handling it.
+
+    def create_analysed(pos, env, body, finally_clause):
+        node = TryFinallyStatNode(pos, body=body, finally_clause=finally_clause)
+        node.cleanup_list = []
+        return node
+    create_analysed = staticmethod(create_analysed)
     
     def analyse_control_flow(self, env):
         env.start_branching(self.pos)

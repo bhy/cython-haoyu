@@ -9,6 +9,8 @@ import PyrexTypes
 from sets import Set as set
 
 class PureCFuncNode(Node):
+    child_attrs = []
+    
     def __init__(self, pos, cname, type, c_code, visibility='private'):
         self.pos = pos
         self.cname = cname
@@ -95,16 +97,16 @@ class BufferTransform(CythonTransform):
         # For all buffers, insert extra variables in the scope.
         # The variables are also accessible from the buffer_info
         # on the buffer entry
-        bufvars = [(name, entry) for name, entry
+        bufvars = [entry for name, entry
                    in scope.entries.iteritems()
-                   if entry.type.buffer_options is not None]
+                   if entry.type.is_buffer]
                    
-        for name, entry in bufvars:
-            
-            bufopts = entry.type.buffer_options
+        for entry in bufvars:
+            name = entry.name
+            buftype = entry.type
 
             # Get or make a type string checker
-            tschecker = self.tschecker(bufopts.dtype)
+            tschecker = self.tschecker(buftype.dtype)
 
             # Declare auxiliary vars
             bufinfo = scope.declare_var(temp_name_handle(u"%s_bufinfo" % name),
@@ -116,7 +118,7 @@ class BufferTransform(CythonTransform):
             
             stridevars = []
             shapevars = []
-            for idx in range(bufopts.ndim):
+            for idx in range(buftype.ndim):
                 # stride
                 varname = temp_name_handle(u"%s_%s%d" % (name, "stride", idx))
                 var = scope.declare_var(varname, PyrexTypes.c_int_type, node.pos, is_cdef=True)
@@ -128,6 +130,7 @@ class BufferTransform(CythonTransform):
             entry.buffer_aux = Symtab.BufferAux(bufinfo, stridevars, 
                                                 shapevars, tschecker)
             entry.buffer_aux.temp_var = temp_var
+        scope.buffer_entries = bufvars
         self.scope = scope
 
     # Notes: The cast to <char*> gets around Cython not supporting const types
@@ -216,15 +219,36 @@ class BufferTransform(CythonTransform):
             expr = AddNode(pos, operator='+', operand1=expr, operand2=next)
 
         casted = TypecastNode(pos, operand=expr,
-                              type=PyrexTypes.c_ptr_type(node.base.entry.type.buffer_options.dtype))
+                              type=PyrexTypes.c_ptr_type(node.base.entry.type.dtype))
         result = IndexNode(pos, base=casted, index=IntNode(pos, value='0'))
 
         return result
 
+    buffer_cleanup_fragment = TreeFragment(u"""
+        if BUF is not None:
+            __cython__.PyObject_ReleaseBuffer(<__cython__.PyObject*>BUF, &BUFINFO)
+    """)
+    def funcdef_buffer_cleanup(self, node):
+        pos = node.pos
+        env = node.local_scope
+        cleanups = [self.buffer_cleanup_fragment.substitute({
+                u"BUF" : NameNode(pos, name=entry.name),
+                u"BUFINFO": NameNode(pos, name=entry.buffer_aux.buffer_info_var.name)
+                })
+            for entry in node.local_scope.buffer_entries]
+        cleanup_stats = []
+        for c in cleanups: cleanup_stats += c.stats
+        cleanup = StatListNode(pos, stats=cleanup_stats)
+        cleanup.analyse_expressions(env) 
 
+        result = TryFinallyStatNode.create_analysed(pos, env, body=node.body, finally_clause=cleanup)
+        node.body = result
+        return node
+        
     #
     # Transforms
     #
+    
     def visit_ModuleNode(self, node):
         self.handle_scope(node, node.scope)
         self.visitchildren(node)
@@ -233,7 +257,7 @@ class BufferTransform(CythonTransform):
     def visit_FuncDefNode(self, node):
         self.handle_scope(node, node.local_scope)
         self.visitchildren(node)
-        return node
+        return self.funcdef_buffer_cleanup(node)
 
     def visit_SingleAssignmentNode(self, node):
         # On assignments, two buffer-related things can happen:
@@ -284,7 +308,7 @@ class BufferTransform(CythonTransform):
         funcnode = self.ts_item_checkers.get(dtype)
         if funcnode is None:
             char = dtype.typestring
-            if char is not None and len(char) > 1:
+            if char is not None and len(char) == 1:
                 # Can use direct comparison
                 funcnode = self.new_ts_func("natitem_%s" % self.mangle_dtype_name(dtype), """\
   if (*ts != '%s') {
@@ -411,4 +435,5 @@ class BufferTransform(CythonTransform):
 
 # TODO:
 # - buf must be NULL before getting new buffer
+
 
