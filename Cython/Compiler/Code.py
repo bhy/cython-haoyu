@@ -211,7 +211,7 @@ class CCodeWriter:
             #print "...private and not definition, skipping" ###
             return
         if not entry.used and visibility == "private":
-            #print "not used and private, skipping" ###
+            #print "not used and private, skipping", entry.cname ###
             return
         storage_class = ""
         if visibility == 'extern':
@@ -337,6 +337,12 @@ class CCodeWriter:
         self.putln("#ifndef %s" % guard)
         self.putln("#define %s" % guard)
     
+    def unlikely(self, cond):
+        if Options.gcc_branch_hints:
+            return 'unlikely(%s)' % cond
+        else:
+            return cond
+        
     def error_goto(self, pos):
         lbl = self.error_label
         self.use_label(lbl)
@@ -352,12 +358,9 @@ class CCodeWriter:
             pos[1],
             cinfo,
             lbl)
-            
+
     def error_goto_if(self, cond, pos):
-        if Options.gcc_branch_hints:
-            return "if (unlikely(%s)) %s" % (cond, self.error_goto(pos))
-        else:
-            return "if (%s) %s" % (cond, self.error_goto(pos))
+        return "if (%s) %s" % (self.unlikely(cond), self.error_goto(pos))
             
     def error_goto_if_null(self, cname, pos):
         return self.error_goto_if("!%s" % cname, pos)

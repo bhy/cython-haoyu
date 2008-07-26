@@ -73,6 +73,7 @@ class Node(object):
     
     is_name = 0
     is_literal = 0
+    temps = None
 
     # All descandants should set child_attrs to a list of the attributes
     # containing nodes considered "children" in the tree. Each such attribute
@@ -102,7 +103,7 @@ class Node(object):
         for attrname in result.child_attrs:
             value = getattr(result, attrname)
             if isinstance(value, list):
-                setattr(result, attrname, value)
+                setattr(result, attrname, [x for x in value])
         return result
     
     
@@ -251,6 +252,11 @@ class StatListNode(Node):
     # stats     a list of StatNode
     
     child_attrs = ["stats"]
+
+    def create_analysed(pos, env, *args, **kw):
+        node = StatListNode(pos, *args, **kw)
+        return node # No node-specific analysis necesarry
+    create_analysed = staticmethod(create_analysed)
     
     def analyse_control_flow(self, env):
         for stat in self.stats:
@@ -344,12 +350,6 @@ class CDeclaratorNode(Node):
 
     calling_convention = ""
 
-    def analyse_expressions(self, env):
-        pass
-
-    def generate_execution_code(self, env):
-        pass
-
 
 class CNameDeclaratorNode(CDeclaratorNode):
     #  name    string             The Pyrex name being declared
@@ -368,29 +368,6 @@ class CNameDeclaratorNode(CDeclaratorNode):
         self.type = base_type
         return self, base_type
         
-    def analyse_expressions(self, env):
-        self.entry = env.lookup(self.name)
-        if self.default is not None:
-            env.control_flow.set_state(self.default.end_pos(), (self.entry.name, 'initalized'), True)
-            env.control_flow.set_state(self.default.end_pos(), (self.entry.name, 'source'), 'assignment')
-            self.entry.used = 1
-            if self.type.is_pyobject:
-                self.entry.init_to_none = False
-                self.entry.init = 0
-            self.default.analyse_types(env)
-            self.default = self.default.coerce_to(self.type, env)
-            self.default.allocate_temps(env)
-            self.default.release_temp(env)
-
-    def generate_execution_code(self, code):
-        if self.default is not None:
-            self.default.generate_evaluation_code(code)
-            if self.type.is_pyobject:
-                self.default.make_owned_reference(code)
-            code.putln('%s = %s;' % (self.entry.cname, self.default.result_as(self.entry.type)))
-            self.default.generate_post_assignment_code(code)
-            code.putln()
-
 class CPtrDeclaratorNode(CDeclaratorNode):
     # base     CDeclaratorNode
     
@@ -403,12 +380,6 @@ class CPtrDeclaratorNode(CDeclaratorNode):
         ptr_type = PyrexTypes.c_ptr_type(base_type)
         return self.base.analyse(ptr_type, env, nonempty = nonempty)
         
-    def analyse_expressions(self, env):
-        self.base.analyse_expressions(env)
-
-    def generate_execution_code(self, env):
-        self.base.generate_execution_code(env)
-
 class CArrayDeclaratorNode(CDeclaratorNode):
     # base        CDeclaratorNode
     # dimension   ExprNode
@@ -629,8 +600,7 @@ class CBufferAccessTypeNode(Node):
     def analyse(self, env):
         base_type = self.base_type_node.analyse(env)
         dtype = self.dtype_node.analyse(env)
-        options = PyrexTypes.BufferOptions(dtype=dtype, ndim=self.ndim)
-        self.type = PyrexTypes.create_buffer_type(base_type, options)
+        self.type = PyrexTypes.BufferType(base_type, dtype=dtype, ndim=self.ndim)
         return self.type
 
 class CComplexBaseTypeNode(CBaseTypeNode):
@@ -685,14 +655,6 @@ class CVarDefNode(StatNode):
                 dest_scope.declare_var(name, type, declarator.pos,
                     cname = cname, visibility = self.visibility, is_cdef = 1)
     
-    def analyse_expressions(self, env):
-        for declarator in self.declarators:
-            declarator.analyse_expressions(env)
-    
-    def generate_execution_code(self, code):
-        for declarator in self.declarators:
-            declarator.generate_execution_code(code)
-
 
 class CStructOrUnionDefNode(StatNode):
     #  name          string
@@ -866,6 +828,7 @@ class FuncDefNode(StatNode, BlockNode):
         return lenv
                 
     def generate_function_definitions(self, env, code, transforms):
+        import Buffer
         # Generate C code for header and body of function
         code.init_labels()
         lenv = self.local_scope
@@ -914,7 +877,9 @@ class FuncDefNode(StatNode, BlockNode):
         for entry in lenv.arg_entries:
             if entry.type.is_pyobject and lenv.control_flow.get_state((entry.name, 'source')) != 'arg':
                 code.put_var_incref(entry)
-        # ----- Initialise local variables
+            if entry.type.is_buffer:
+                Buffer.put_acquire_arg_buffer(entry, code, self.pos)
+        # ----- Initialise local variables 
         for entry in lenv.var_entries:
             if entry.type.is_pyobject and entry.init_to_none and entry.used:
                 code.put_init_var_to_py_none(entry)
@@ -963,6 +928,8 @@ class FuncDefNode(StatNode, BlockNode):
             for entry in lenv.var_entries:
                 if lenv.control_flow.get_state((entry.name, 'initalized')) is not True:
                     entry.xdecref_cleanup = 1
+        for entry in lenv.buffer_entries:
+            Buffer.put_release_buffer(entry, code)
         code.put_var_decrefs(lenv.var_entries, used_only = 1)
         # Decref any increfed args
         for entry in lenv.arg_entries:
@@ -2231,8 +2198,10 @@ class SingleAssignmentNode(AssignmentNode):
     #
     #  lhs      ExprNode      Left hand side
     #  rhs      ExprNode      Right hand side
+    #  first    bool          Is this guaranteed the first assignment to lhs?
     
     child_attrs = ["lhs", "rhs"]
+    first = False
 
     def analyse_declarations(self, env):
         self.lhs.analyse_target_declaration(env)
@@ -2265,7 +2234,7 @@ class SingleAssignmentNode(AssignmentNode):
 #		self.lhs.allocate_target_temps(env)
 #		self.lhs.release_target_temp(env)
 #		self.rhs.release_temp(env)		
-
+        
     def generate_rhs_evaluation_code(self, code):
         self.rhs.generate_evaluation_code(code)
     
@@ -3344,6 +3313,7 @@ class TryExceptStatNode(StatNode):
         self.gil_check(env)
     
     def analyse_expressions(self, env):
+
         self.body.analyse_expressions(env)
         self.cleanup_list = env.free_temp_entries[:]
         for except_clause in self.except_clauses:
@@ -3523,6 +3493,12 @@ class TryFinallyStatNode(StatNode):
     # There doesn't seem to be any point in disallowing
     # continue in the try block, since we have no problem
     # handling it.
+
+    def create_analysed(pos, env, body, finally_clause):
+        node = TryFinallyStatNode(pos, body=body, finally_clause=finally_clause)
+        node.cleanup_list = []
+        return node
+    create_analysed = staticmethod(create_analysed)
     
     def analyse_control_flow(self, env):
         env.start_branching(self.pos)

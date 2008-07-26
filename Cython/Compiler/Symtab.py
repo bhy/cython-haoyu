@@ -20,6 +20,8 @@ possible_identifier = re.compile(ur"(?![0-9])\w+$", re.U).match
 nice_identifier = re.compile('^[a-zA-Z0-0_]+$').match
 
 class BufferAux:
+    writable_needed = False
+    
     def __init__(self, buffer_info_var, stridevars, shapevars, tschecker):
         self.buffer_info_var = buffer_info_var
         self.stridevars = stridevars
@@ -141,6 +143,15 @@ class Entry:
     def redeclared(self, pos):
         error(pos, "'%s' does not match previous declaration" % self.name)
         error(self.pos, "Previous declaration is here")
+
+def new_temp(type, description=""):
+    # Returns a temporary entry which is "floating" and not finally resolved
+    # before the AnchorTemps transform is run. cname will not be available on
+    # the temp before this transform is run. See the mentioned transform for
+    # more docs.
+    e = Entry(name="$" + description, type=type, cname="<temperror>")
+    e.is_variable = True
+    return e
         
 class Scope:
     # name              string             Unqualified name
@@ -216,6 +227,7 @@ class Scope:
         self.num_to_entry = {}
         self.obj_to_entry = {}
         self.pystring_entries = []
+        self.buffer_entries = []
         self.control_flow = ControlFlow.LinearControlFlow()
         
     def start_branching(self, pos):
