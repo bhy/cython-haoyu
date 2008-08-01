@@ -22,10 +22,30 @@ from Scanning import PyrexScanner, FileSourceDescriptor
 from Errors import PyrexError, CompileError, error
 from Symtab import BuiltinScope, ModuleScope
 from Cython import Utils
+from Cython.Utils import open_new_file, replace_suffix
 
 module_name_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
 verbose = 0
+
+def dumptree(t):
+    # For quick debugging in pipelines
+    print t.dump()
+    return t
+
+class CompilationData:
+    #  Bundles the information that is passed from transform to transform.
+    #  (For now, this is only)
+
+    #  While Context contains every pxd ever loaded, path information etc.,
+    #  this only contains the data related to a single compilation pass
+    #
+    #  pyx                   ModuleNode              Main code tree of this compilation.
+    #  pxds                  {string : ModuleNode}   Trees for the pxds used in the pyx.
+    #  codewriter            CCodeWriter             Where to output final code.
+    #  options               CompilationOptions
+    #  result                CompilationResult
+    pass
 
 class Context:
     #  This class encapsulates the context needed for compiling
@@ -42,18 +62,104 @@ class Context:
         #self.modules = {"__builtin__" : BuiltinScope()}
         import Builtin
         self.modules = {"__builtin__" : Builtin.builtin_scope}
-        self.pxds = {}
-        self.pyxs = {}
         self.include_directories = include_directories
         self.future_directives = set()
 
-        import os.path
+        self.pxds = {} # full name -> node tree
 
         standard_include_path = os.path.abspath(
             os.path.join(os.path.dirname(__file__), '..', 'Includes'))
         self.include_directories = include_directories + [standard_include_path]
 
+    def create_pipeline(self, pxd):
+        from Visitor import PrintTree
+        from ParseTreeTransforms import WithTransform, NormalizeTree, PostParse, PxdPostParse
+        from ParseTreeTransforms import AnalyseDeclarationsTransform, AnalyseExpressionsTransform
+        from ParseTreeTransforms import CreateClosureClasses, MarkClosureVisitor, DecoratorTransform
+        from Optimize import FlattenInListTransform, SwitchTransform, OptimizeRefcounting
+        from Buffer import IntroduceBufferAuxiliaryVars
+        from ModuleNode import check_c_classes
+
+        if pxd:
+            _check_c_classes = None
+            _specific_post_parse = PxdPostParse(self)
+        else:
+            _check_c_classes = check_c_classes
+            _specific_post_parse = None
+ 
+        return [
+            NormalizeTree(self),
+            PostParse(self),
+            _specific_post_parse,
+            FlattenInListTransform(),
+            WithTransform(self),
+            DecoratorTransform(self),
+            AnalyseDeclarationsTransform(self),
+            IntroduceBufferAuxiliaryVars(self),
+            _check_c_classes,
+            AnalyseExpressionsTransform(self),
+            SwitchTransform(),
+            OptimizeRefcounting(self),
+            #        CreateClosureClasses(context),
+            ]
+
+    def create_pyx_pipeline(self, options, result):
+        def generate_pyx_code(module_node):
+            module_node.process_implementation(options, result)
+            result.compilation_source = module_node.compilation_source
+            return result
+
+        def inject_pxd_code(module_node):
+            from Nodes import CCommentNode
+            from textwrap import dedent
+            stats = module_node.body.stats
+            for name, (statlistnode, scope) in self.pxds.iteritems():
+                #stats.append(CCommentNode('Code from cimported "%s"' % name, header=True))
+                stats.append(statlistnode)
+            return module_node
+
+        return ([
+                create_parse(self)
+            ] + self.create_pipeline(pxd=False) + [
+                inject_pxd_code,
+                generate_pyx_code,
+            ])
+
+    def create_pxd_pipeline(self, scope, module_name):
+        def parse_pxd(source_desc):
+            tree = self.parse(source_desc, scope, pxd=True,
+                              full_module_name=module_name)
+            tree.scope = scope
+            tree.is_pxd = True
+            return tree
+
+        from CodeGeneration import ExtractPxdCode
+
+        # The pxd pipeline ends up with a CCodeWriter containing the
+        # code of the pxd, as well as a pxd scope.
+        return [parse_pxd] + self.create_pipeline(pxd=True) + [
+            ExtractPxdCode(self)
+            ]
+
+    def process_pxd(self, source_desc, scope, module_name):
+        pipeline = self.create_pxd_pipeline(scope, module_name)
+        return self.run_pipeline(pipeline, source_desc)
         
+    def nonfatal_error(self, exc):
+        return Errors.report_error(exc)
+
+    def run_pipeline(self, pipeline, source):
+        errors_occurred = False
+        data = source
+        try:
+            for phase in pipeline:
+                if phase is not None:
+                    data = phase(data)
+        except CompileError, err:
+            errors_occurred = True
+            Errors.report_error(err)
+        return (errors_occurred, data)
+
     def find_module(self, module_name, 
             relative_to = None, pos = None, need_pxd = 1):
         # Finds and returns the module scope corresponding to
@@ -106,9 +212,8 @@ class Context:
                     if debug_find_module:
                         print("Context.find_module: Parsing %s" % pxd_pathname)
                     source_desc = FileSourceDescriptor(pxd_pathname)
-                    pxd_tree = self.parse(source_desc, scope, pxd = 1,
-                                          full_module_name = module_name)
-                    pxd_tree.analyse_declarations(scope)
+                    errors_occured, (pxd_codenodes, pxd_scope) = self.process_pxd(source_desc, scope, module_name)
+                    self.pxds[module_name] = (pxd_codenodes, pxd_scope)
                 except CompileError:
                     pass
         return scope
@@ -330,20 +435,6 @@ class Context:
                     verbose_flag = options.show_version,
                     cplus = options.cplus)
 
-    def nonfatal_error(self, exc):
-        return Errors.report_error(exc)
-
-    def run_pipeline(self, pipeline, source):
-        errors_occurred = False
-        data = source
-        try:
-            for phase in pipeline:
-                data = phase(data)
-        except CompileError, err:
-            errors_occurred = True
-            Errors.report_error(err)
-        return (errors_occurred, data)
-
 def create_parse(context):
     def parse(compsrc):
         source_desc = compsrc.source_desc
@@ -353,44 +444,9 @@ def create_parse(context):
         tree = context.parse(source_desc, scope, pxd = 0, full_module_name = full_module_name)
         tree.compilation_source = compsrc
         tree.scope = scope
+        tree.is_pxd = False
         return tree
     return parse
-
-def create_generate_code(context, options, result):
-    def generate_code(module_node):
-        scope = module_node.scope
-        module_node.process_implementation(options, result)
-        result.compilation_source = module_node.compilation_source
-        return result
-    return generate_code
-
-def create_default_pipeline(context, options, result):
-    from Visitor import PrintTree
-    from ParseTreeTransforms import WithTransform, NormalizeTree, PostParse
-    from ParseTreeTransforms import AnalyseDeclarationsTransform, AnalyseExpressionsTransform
-    from ParseTreeTransforms import CreateClosureClasses, MarkClosureVisitor, DecoratorTransform
-    from Optimize import FlattenInListTransform, SwitchTransform, OptimizeRefcounting
-    from Buffer import IntroduceBufferAuxiliaryVars
-    from ModuleNode import check_c_classes
-    def printit(x): print x.dump()
-    return [
-        create_parse(context),
-#        printit,
-        NormalizeTree(context),
-        PostParse(context),
-        FlattenInListTransform(),
-        WithTransform(context),
-        DecoratorTransform(context),
-        AnalyseDeclarationsTransform(context),
-        IntroduceBufferAuxiliaryVars(context),
-        check_c_classes,
-        AnalyseExpressionsTransform(context),
-#        BufferTransform(context),
-        SwitchTransform(),
-        OptimizeRefcounting(context),
-#        CreateClosureClasses(context),
-        create_generate_code(context, options, result)
-    ]
 
 def create_default_resultobj(compilation_source, options):
     result = CompilationResult()
@@ -428,7 +484,7 @@ def run_pipeline(source, options, full_module_name = None):
     result = create_default_resultobj(source, options)
     
     # Get pipeline
-    pipeline = create_default_pipeline(context, options, result)
+    pipeline = context.create_pyx_pipeline(options, result)
 
     context.setup_errors(options)
     errors_occurred, enddata = context.run_pipeline(pipeline, source)
