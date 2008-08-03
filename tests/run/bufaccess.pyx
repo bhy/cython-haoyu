@@ -11,7 +11,7 @@
 
 cimport stdlib
 cimport python_buffer
-# Add all test_X function docstrings as unit tests
+cimport stdio
 
 __test__ = {}
 setup_string = """
@@ -33,6 +33,19 @@ def testcas(a):
 #
 # Buffer acquire and release tests
 #
+
+def nousage():
+    """
+    The challenge here is just compilation.
+    """
+    cdef object[int, 2] buf
+
+def printbuf():
+    """
+    Just compilation.
+    """
+    cdef object[int, 2] buf
+    print buf
 
 @testcase
 def acquire_release(o1, o2):
@@ -570,8 +583,6 @@ available_flags = (
     ('STRIDES', python_buffer.PyBUF_STRIDES),
     ('WRITABLE', python_buffer.PyBUF_WRITABLE)
 )
-
-cimport stdio
 
 cdef class MockBuffer:
     cdef object format
