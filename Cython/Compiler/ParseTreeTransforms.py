@@ -6,6 +6,7 @@ from Cython.Compiler.TreeFragment import TreeFragment
 from Cython.Utils import EncodedString
 from Cython.Compiler.Errors import CompileError
 from sets import Set as set
+import copy
 
 class NormalizeTree(CythonTransform):
     """
@@ -211,6 +212,78 @@ class PostParse(CythonTransform):
         # We're done with the parse tree args
         node.positional_args = None
         node.keyword_args = None
+        return node
+
+class PxdPostParse(CythonTransform):
+    """
+    Basic interpretation/validity checking that should only be
+    done on pxd trees.
+
+    A lot of this checking currently happens in the parser; but
+    what is listed below happens here.
+
+    - "def" functions are let through only if they fill the
+    getbuffer/releasebuffer slots
+    """
+    ERR_FUNCDEF_NOT_ALLOWED = 'function definition not allowed here'
+
+    def __call__(self, node):
+        self.scope_type = 'pxd'
+        return super(PxdPostParse, self).__call__(node)
+
+    def visit_CClassDefNode(self, node):
+        old = self.scope_type
+        self.scope_type = 'cclass'
+        self.visitchildren(node)
+        self.scope_type = old
+        return node
+
+    def visit_FuncDefNode(self, node):
+        # FuncDefNode always come with an implementation (without
+        # an imp they are CVarDefNodes..)
+        ok = False
+
+        if (isinstance(node, DefNode) and self.scope_type == 'cclass'
+            and node.name in ('__getbuffer__', '__releasebuffer__')):
+            ok = True
+
+        if not ok:
+            self.context.nonfatal_error(PostParseError(node.pos,
+                self.ERR_FUNCDEF_NOT_ALLOWED))
+            return None
+        else:
+            return node
+
+class ResolveOptions(CythonTransform):
+    """
+    After parsing, options can be stored in a number of places:
+    - #cython-comments at the top of the file (stored in ModuleNode)
+    - Command-line arguments overriding these
+    - @cython.optionname decorators
+    - with cython.optionname: statements
+
+    This transform is responsible for annotating each node with an
+    "options" attribute linking it to a dict containing the exact
+    options that are in effect for that node. Any corresponding decorators
+    or with statements are removed in the process.
+    """
+
+    def __init__(self, context, compilation_option_overrides):
+        super(ResolveOptions, self).__init__(context)
+        self.compilation_option_overrides = compilation_option_overrides
+
+    def visit_ModuleNode(self, node):
+        options = copy.copy(Options.option_defaults)
+        options.update(node.option_comments)
+        options.update(self.compilation_option_overrides)
+        self.options = options
+        node.options = options
+        self.visitchildren(node)
+        return node
+
+    def visit_Node(self, node):
+        node.options = self.options
+        self.visitchildren(node)
         return node
 
 class WithTransform(CythonTransform):

@@ -11,6 +11,7 @@ from ModuleNode import ModuleNode
 from Errors import error, warning, InternalError
 from Cython import Utils
 import Future
+import Options
 
 class Ctx(object):
     #  Parsing context
@@ -506,6 +507,8 @@ def p_atom(s):
     elif sy == 'NULL':
         s.next()
         return ExprNodes.NullNode(pos)
+    elif sy == 'option_comment':
+        s.error("#cython option comments only allowed at beginning of file")
     else:
         s.error("Expected an identifier or literal")
 
@@ -1405,7 +1408,7 @@ def p_statement(s, ctx, first_statement = 0):
             if ctx.api:
                 error(s.pos, "'api' not allowed with this statement")
             elif s.sy == 'def':
-                if ctx.level not in ('module', 'class', 'c_class', 'property'):
+                if ctx.level not in ('module', 'class', 'c_class', 'c_class_pxd', 'property'):
                     s.error('def statement not allowed here')
                 s.level = ctx.level
                 return p_def_statement(s)
@@ -2317,6 +2320,17 @@ def p_code(s, level=None):
             repr(s.sy), repr(s.systring)))
     return body
 
+def p_option_comments(s):
+    result = {}
+    while s.sy == 'option_comment':
+        opts = s.systring[len("#cython:"):]
+        try:
+            result.update(Options.parse_option_list(opts))
+        except ValueError, e:
+            s.error(e.message, fatal=False)
+        s.next()
+    return result
+
 def p_module(s, pxd, full_module_name):
     s.add_type_name("object")
     s.add_type_name("Py_buffer")
@@ -2326,11 +2340,15 @@ def p_module(s, pxd, full_module_name):
         level = 'module_pxd'
     else:
         level = 'module'
+
+    option_comments = p_option_comments(s)
     body = p_statement_list(s, Ctx(level = level), first_statement = 1)
     if s.sy != 'EOF':
         s.error("Syntax error in statement [%s,%s]" % (
             repr(s.sy), repr(s.systring)))
-    return ModuleNode(pos, doc = doc, body = body, full_module_name = full_module_name)
+    return ModuleNode(pos, doc = doc, body = body,
+                      full_module_name = full_module_name,
+                      option_comments = option_comments)
 
 #----------------------------------------------
 #

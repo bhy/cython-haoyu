@@ -199,21 +199,15 @@ class BlockNode:
 
     def generate_const_definitions(self, env, code):
         if env.const_entries:
-            code.putln("")
             for entry in env.const_entries:
                 if not entry.is_interned:
-                    code.put_var_declaration(entry, static = 1)
+                    code.globalstate.add_const_definition(entry)
 
     def generate_interned_string_decls(self, env, code):
         entries = env.global_scope().new_interned_string_entries
         if entries:
-            code.putln("")
             for entry in entries:
-                code.put_var_declaration(entry, static = 1)
-            code.putln("")
-            for entry in entries:
-                code.putln(
-                    "static PyObject *%s;" % entry.pystring_cname)
+                code.globalstate.add_interned_string_decl(entry)
             del entries[:]
 
     def generate_py_string_decls(self, env, code):
@@ -221,11 +215,9 @@ class BlockNode:
             return # earlier error
         entries = env.pystring_entries
         if entries:
-            code.putln("")
             for entry in entries:
                 if not entry.is_interned:
-                    code.putln(
-                        "static PyObject *%s;" % entry.pystring_cname)
+                    code.globalstate.add_py_string_decl(entry)
 
     def generate_interned_num_decls(self, env, code):
         #  Flush accumulated interned nums from the global scope
@@ -233,18 +225,14 @@ class BlockNode:
         genv = env.global_scope()
         entries = genv.interned_nums
         if entries:
-            code.putln("")
             for entry in entries:
-                code.putln(
-                    "static PyObject *%s;" % entry.cname)
+                code.globalstate.add_interned_num_decl(entry)
             del entries[:]
 
     def generate_cached_builtins_decls(self, env, code):
         entries = env.global_scope().undeclared_cached_builtins
-        if len(entries) > 0:
-            code.putln("")
         for entry in entries:
-            code.putln("static PyObject *%s;" % entry.cname)
+            code.globalstate.add_cached_builtin_decl(entry)
         del entries[:]
         
 
@@ -272,10 +260,10 @@ class StatListNode(Node):
         for stat in self.stats:
             stat.analyse_expressions(env)
     
-    def generate_function_definitions(self, env, code, transforms):
+    def generate_function_definitions(self, env, code):
         #print "StatListNode.generate_function_definitions" ###
         for stat in self.stats:
-            stat.generate_function_definitions(env, code, transforms)
+            stat.generate_function_definitions(env, code)
             
     def generate_execution_code(self, code):
         #print "StatListNode.generate_execution_code" ###
@@ -301,7 +289,7 @@ class StatNode(Node):
     #        Emit C code for executable statements.
     #
     
-    def generate_function_definitions(self, env, code, transforms):
+    def generate_function_definitions(self, env, code):
         pass
     
     def generate_execution_code(self, code):
@@ -852,7 +840,7 @@ class FuncDefNode(StatNode, BlockNode):
         self.local_scope = lenv
         return lenv
                 
-    def generate_function_definitions(self, env, code, transforms):
+    def generate_function_definitions(self, env, code):
         import Buffer
 
         lenv = self.local_scope
@@ -971,7 +959,8 @@ class FuncDefNode(StatNode, BlockNode):
         # goto statement in error cleanup above
         code.put_label(code.return_label)
         for entry in lenv.buffer_entries:
-            code.putln("%s;" % Buffer.get_release_buffer_code(entry))
+            if entry.used:
+                code.putln("%s;" % Buffer.get_release_buffer_code(entry))
         # ----- Return cleanup for both error and no-error return
         code.put_label(code.return_from_error_cleanup_label)
         if not Options.init_local_none:
@@ -993,11 +982,11 @@ class FuncDefNode(StatNode, BlockNode):
         code.putln("}")
         # ----- Go back and insert temp variable declarations
         tempvardecl_code.put_var_declarations(lenv.temp_entries)
-        tempvardecl_code.put_temp_declarations(code.func)
+        tempvardecl_code.put_temp_declarations(code.funcstate)
         # ----- Python version
         code.exit_cfunc_scope()
         if self.py_func:
-            self.py_func.generate_function_definitions(env, code, transforms)
+            self.py_func.generate_function_definitions(env, code)
         self.generate_optarg_wrapper_function(env, code)
         
     def put_stararg_decrefs(self, code):
@@ -2028,10 +2017,9 @@ class PyClassDefNode(ClassDefNode):
         #self.classobj.release_temp(env)
         #self.target.release_target_temp(env)
     
-    def generate_function_definitions(self, env, code, transforms):
+    def generate_function_definitions(self, env, code):
         self.generate_py_string_decls(self.scope, code)
-        self.body.generate_function_definitions(
-            self.scope, code, transforms)
+        self.body.generate_function_definitions(self.scope, code)
     
     def generate_execution_code(self, code):
         self.dict.generate_evaluation_code(code)
@@ -2147,11 +2135,11 @@ class CClassDefNode(ClassDefNode):
             scope = self.entry.type.scope
             self.body.analyse_expressions(scope)
     
-    def generate_function_definitions(self, env, code, transforms):
+    def generate_function_definitions(self, env, code):
         self.generate_py_string_decls(self.entry.type.scope, code)
         if self.body:
             self.body.generate_function_definitions(
-                self.entry.type.scope, code, transforms)
+                self.entry.type.scope, code)
     
     def generate_execution_code(self, code):
         # This is needed to generate evaluation code for
@@ -2185,8 +2173,8 @@ class PropertyNode(StatNode):
     def analyse_expressions(self, env):
         self.body.analyse_expressions(env)
     
-    def generate_function_definitions(self, env, code, transforms):
-        self.body.generate_function_definitions(env, code, transforms)
+    def generate_function_definitions(self, env, code):
+        self.body.generate_function_definitions(env, code)
 
     def generate_execution_code(self, code):
         pass
@@ -2672,7 +2660,7 @@ class ContinueStatNode(StatNode):
         pass
     
     def generate_execution_code(self, code):
-        if code.in_try_finally:
+        if code.funcstate.in_try_finally:
             error(self.pos, "continue statement inside try of try...finally")
         elif not code.continue_label:
             error(self.pos, "continue statement not inside loop")
@@ -2835,7 +2823,7 @@ class ReraiseStatNode(StatNode):
     gil_message = "Raising exception"
 
     def generate_execution_code(self, code):
-        vars = code.exc_vars
+        vars = code.funcstate.exc_vars
         if vars:
             code.putln("__Pyx_Raise(%s, %s, %s);" % tuple(vars))
             code.putln(code.error_goto(self.pos))
@@ -3516,10 +3504,10 @@ class ExceptClauseNode(Node):
             self.excinfo_tuple.generate_evaluation_code(code)
             self.excinfo_target.generate_assignment_code(self.excinfo_tuple, code)
 
-        old_exc_vars = code.exc_vars
-        code.exc_vars = self.exc_vars
+        old_exc_vars = code.funcstate.exc_vars
+        code.funcstate.exc_vars = self.exc_vars
         self.body.generate_execution_code(code)
-        code.exc_vars = old_exc_vars
+        code.funcstate.exc_vars = old_exc_vars
         for var in self.exc_vars:
             code.putln("Py_DECREF(%s); %s = 0;" % (var, var))
         code.put_goto(end_label)
@@ -3594,11 +3582,11 @@ class TryFinallyStatNode(StatNode):
         code.putln(
             "/*try:*/ {")
         if self.disallow_continue_in_try_finally:
-            was_in_try_finally = code.in_try_finally
-            code.in_try_finally = 1
+            was_in_try_finally = code.funcstate.in_try_finally
+            code.funcstate.in_try_finally = 1
         self.body.generate_execution_code(code)
         if self.disallow_continue_in_try_finally:
-            code.in_try_finally = was_in_try_finally
+            code.funcstate.in_try_finally = was_in_try_finally
         code.putln(
             "}")
         code.putln(
@@ -3922,6 +3910,7 @@ class FromImportStatNode(StatNode):
                     code.error_goto_if_null(self.item.result_code, self.pos)))
             target.generate_assignment_code(self.item, code)
         self.module.generate_disposal_code(code)
+
 
 #------------------------------------------------------------------------------------
 #

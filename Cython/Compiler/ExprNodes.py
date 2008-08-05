@@ -891,9 +891,6 @@ class NameNode(AtomicExprNode):
             self.type = PyrexTypes.error_type
         self.entry.used = 1
         if self.entry.type.is_buffer:
-            # Have an rhs temp just in case. All rhs I could
-            # think of had a single symbol result_code but better
-            # safe than sorry. Feel free to change this.
             import Buffer
             Buffer.used_buffer_aux_vars(self.entry)
                 
@@ -970,6 +967,9 @@ class NameNode(AtomicExprNode):
         entry = self.entry
         if entry:
             entry.used = 1
+            if entry.type.is_buffer:
+                import Buffer
+                Buffer.used_buffer_aux_vars(entry)
             if entry.utility_code:
                 env.use_utility_code(entry.utility_code)
         
@@ -1071,7 +1071,7 @@ class NameNode(AtomicExprNode):
             rhs.generate_post_assignment_code(code)
 
     def generate_acquire_buffer(self, rhs, code):
-        rhstmp = code.func.allocate_temp(self.entry.type)
+        rhstmp = code.funcstate.allocate_temp(self.entry.type)
         buffer_aux = self.entry.buffer_aux
         bufstruct = buffer_aux.buffer_info_var.cname
         code.putln('%s = %s;' % (rhstmp, rhs.result_as(self.ctype())))
@@ -1081,7 +1081,7 @@ class NameNode(AtomicExprNode):
                                     is_initialized=not self.skip_assignment_decref,
                                     pos=self.pos, code=code)
         code.putln("%s = 0;" % rhstmp)
-        code.func.release_temp(rhstmp)
+        code.funcstate.release_temp(rhstmp)
     
     def generate_deletion_code(self, code):
         if self.entry is None:
@@ -1526,7 +1526,7 @@ class IndexNode(ExprNode):
 
     def buffer_access_code(self, code):
         # Assign indices to temps
-        index_temps = [code.func.allocate_temp(i.type) for i in self.indices]
+        index_temps = [code.funcstate.allocate_temp(i.type) for i in self.indices]
         for temp, index in zip(index_temps, self.indices):
             code.putln("%s = %s;" % (temp, index.result_code))
         # Generate buffer access code using these temps
@@ -1534,7 +1534,9 @@ class IndexNode(ExprNode):
         valuecode = Buffer.put_access(entry=self.base.entry,
                                       index_signeds=[i.type.signed for i in self.indices],
                                       index_cnames=index_temps,
+                                      options=self.options,
                                       pos=self.pos, code=code)
+
         return valuecode
 
 
