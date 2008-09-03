@@ -429,14 +429,15 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
         code.putln("")
         code.putln("  typedef struct {")
         code.putln("     void *buf;")
+        code.putln("     PyObject *obj;")
         code.putln("     Py_ssize_t len;")
+        code.putln("     Py_ssize_t itemsize;")
         code.putln("     int readonly;")
-        code.putln("     const char *format;")
         code.putln("     int ndim;")
+        code.putln("     char *format;")
         code.putln("     Py_ssize_t *shape;")
         code.putln("     Py_ssize_t *strides;")
         code.putln("     Py_ssize_t *suboffsets;")
-        code.putln("     Py_ssize_t itemsize;")
         code.putln("     void *internal;")
         code.putln("  } Py_buffer;")
         code.putln("")
@@ -758,10 +759,8 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
                     dll_linkage = dll_linkage)
                 if entry.visibility == 'private':
                     storage_class = "static "
-                elif entry.visibility == 'extern':
-                    storage_class = "%s " % Naming.extern_c_macro
                 else:
-                    storage_class = ""
+                    storage_class = "%s " % Naming.extern_c_macro
                 code.putln("%s%s; /*proto*/" % (
                     storage_class,
                     header))
