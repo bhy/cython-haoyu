@@ -151,3 +151,4 @@ class OptimizeRefcounting(Visitor.CythonTransform):
                 # Set a flag in NameNode to skip the decref
                 lhs.skip_assignment_decref = True
         return node
+

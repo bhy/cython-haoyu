@@ -111,6 +111,7 @@ class TreeVisitor(BasicVisitor):
                     childretval = [self.visitchild(x, parent, attr, idx) for idx, x in enumerate(child)]
                 else:
                     childretval = self.visitchild(child, parent, attr, None)
+                    assert not isinstance(childretval, list), 'Cannot insert list here: %s in %r' % (attr, parent)
                 result[attr] = childretval
         return result
 
@@ -163,9 +164,24 @@ class CythonTransform(VisitorTransform):
         super(CythonTransform, self).__init__()
         self.context = context
 
+    def __call__(self, node):
+        import ModuleNode
+        if isinstance(node, ModuleNode.ModuleNode):
+            self.current_directives = node.directives
+        return super(CythonTransform, self).__call__(node)
+
+    def visit_CompilerDirectivesNode(self, node):
+        old = self.current_directives
+        self.current_directives = node.directives
+        self.visitchildren(node)
+        self.current_directives = old
+        return node
+
     def visit_Node(self, node):
         self.visitchildren(node)
         return node
+
+
 
 
 # Utils

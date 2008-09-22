@@ -1595,13 +1595,12 @@ class IndexNode(ExprNode):
             code.putln("%s = %s;" % (temp, index.result_code))
         # Generate buffer access code using these temps
         import Buffer
-        assert self.options is not None
         # The above could happen because child_attrs is wrong somewhere so that
         # options are not propagated.
         return Buffer.put_buffer_lookup_code(entry=self.base.entry,
                                              index_signeds=[i.type.signed for i in self.indices],
                                              index_cnames=index_temps,
-                                             options=self.options,
+                                             options=code.globalstate.directives,
                                              pos=self.pos, code=code)
 
 class SliceIndexNode(ExprNode):
@@ -2076,6 +2075,8 @@ class AttributeNode(ExprNode):
     #
     #  obj          ExprNode
     #  attribute    string
+    #  needs_none_check boolean        Used if obj is an extension type.
+    #                                  If set to True, it is known that the type is not None.
     #
     #  Used internally:
     #
@@ -2092,6 +2093,7 @@ class AttributeNode(ExprNode):
     result = "<error>"
     entry = None
     is_called = 0
+    needs_none_check = True
 
     def coerce_to(self, dst_type, env):
         #  If coercing to a generic pyobject and this is a cpdef function
@@ -2320,6 +2322,13 @@ class AttributeNode(ExprNode):
                     self.obj.py_result(),
                     self.interned_attr_cname,
                     code.error_goto_if_null(self.result_code, self.pos)))
+        else:
+            # result_code contains what is needed, but we may need to insert
+            # a check and raise an exception
+            if (self.obj.type.is_extension_type
+                  and self.needs_none_check
+                  and code.globalstate.directives['nonecheck']):
+                self.put_nonecheck(code)
     
     def generate_assignment_code(self, rhs, code):
         self.obj.generate_evaluation_code(code)
@@ -2331,6 +2340,11 @@ class AttributeNode(ExprNode):
                     rhs.py_result()))
             rhs.generate_disposal_code(code)
         else:
+            if (self.obj.type.is_extension_type
+                  and self.needs_none_check
+                  and code.globalstate.directives['nonecheck']):
+                self.put_nonecheck(code)
+
             select_code = self.result_code
             if self.type.is_pyobject:
                 rhs.make_owned_reference(code)
@@ -2359,6 +2373,14 @@ class AttributeNode(ExprNode):
             code.annotate(self.pos, AnnotationItem('py_attr', 'python attribute', size=len(self.attribute)))
         else:
             code.annotate(self.pos, AnnotationItem('c_attr', 'c attribute', size=len(self.attribute)))
+
+    def put_nonecheck(self, code):
+        code.globalstate.use_utility_code(raise_noneattr_error_utility_code)
+        code.putln("if (%s) {" % code.unlikely("%s == Py_None") % self.obj.result_as(PyrexTypes.py_object_type))
+        code.putln("__Pyx_RaiseNoneAttributeError(\"%s\");" % self.attribute.encode("UTF-8")) # todo: fix encoding
+        code.putln(code.error_goto(self.pos))
+        code.putln("}")
+
 
 #-------------------------------------------------------------------
 #
@@ -3974,7 +3996,6 @@ class CoercionNode(ExprNode):
     def __init__(self, arg):
         self.pos = arg.pos
         self.arg = arg
-        self.options = arg.options
         if debug_coercion:
             print("%s Coercing %s" % (self, self.arg))
             
@@ -4553,4 +4574,14 @@ static INLINE int __Pyx_SetItemInt(PyObject *o, Py_ssize_t i, PyObject *v, int i
 }
 """,
 """
+"""]
+#------------------------------------------------------------------------------------
+
+raise_noneattr_error_utility_code = [
+"""
+static INLINE void __Pyx_RaiseNoneAttributeError(char* attrname);
+""", """
+static INLINE void __Pyx_RaiseNoneAttributeError(char* attrname) {
+    PyErr_Format(PyExc_AttributeError, "'NoneType' object has no attribute '%s'", attrname);
+}
 """]

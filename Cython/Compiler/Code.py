@@ -161,6 +161,12 @@ class GlobalState(object):
     # interned_nums
     # cached_builtins
 
+    # directives       set             Temporary variable used to track
+    #                                  the current set of directives in the code generation
+    #                                  process.
+
+    directives = {}
+
     def __init__(self, rootwriter, emit_linenums=False):
         self.filename_table = {}
         self.filename_list = []
@@ -419,7 +425,7 @@ class CCodeWriter(object):
     # globalstate      GlobalState     contains state global for a C file (input file info,
     #                                  utility code, declared constants etc.)
     # emit_linenums    boolean         whether or not to write #line pragmas 
-   
+    
     def __init__(self, create_from=None, buffer=None, copy_formatting=False, emit_linenums=None):
         if buffer is None: buffer = StringIOTree()
         self.buffer = buffer

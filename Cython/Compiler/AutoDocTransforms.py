@@ -125,8 +125,7 @@ class EmbedSignature(CythonTransform):
         if not Options.docstrings:
             return node
         else:
-            self.visitchildren(node)
-            return node
+            return super(EmbedSignature, self).__call__(node)
         
     def visit_ClassDefNode(self, node):
         oldincls = self.is_in_class
@@ -144,7 +143,7 @@ class EmbedSignature(CythonTransform):
         return node
 
     def visit_FuncDefNode(self, node):
-        if not node.options['embedsignature']:
+        if not self.current_directives['embedsignature']:
             return node
         
         signature = None
