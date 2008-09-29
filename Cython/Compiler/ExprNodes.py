@@ -1477,6 +1477,7 @@ class IndexNode(ExprNode):
                 # we only need a temp because result_code isn't refactored to
                 # generation time, but this seems an ok shortcut to take
                 self.is_temp = True
+                self.result_ctype = PyrexTypes.c_ptr_type(self.type)
             if setting:
                 if not self.base.entry.type.writable:
                     error(self.pos, "Writing to readonly buffer")
@@ -1524,7 +1525,7 @@ class IndexNode(ExprNode):
     
     def is_lvalue(self):
         return 1
-    
+
     def calculate_result_code(self):
         if self.is_buffer_access:
             return "<not used>"
