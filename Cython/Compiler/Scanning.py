@@ -11,11 +11,14 @@ import stat
 import sys
 from time import time
 
+import cython
+cython.declare(EncodedString=object, string_prefixes=object, raw_prefixes=object, IDENT=object)
+
 from Cython import Plex, Utils
 from Cython.Plex.Scanners import Scanner
 from Cython.Plex.Errors import UnrecognizedInput
 from Errors import CompileError, error
-from Lexicon import string_prefixes, raw_prefixes, make_lexicon
+from Lexicon import string_prefixes, raw_prefixes, make_lexicon, IDENT
 
 from StringEncoding import EncodedString
 
@@ -168,11 +171,12 @@ def build_resword_dict():
         d[word] = 1
     return d
 
+cython.declare(resword_dict=object)
 resword_dict = build_resword_dict()
 
 #------------------------------------------------------------------
 
-class CompileTimeScope(object):
+class CompileTimeScope:
 
     def __init__(self, outer = None):
         self.entries = {}
@@ -183,6 +187,9 @@ class CompileTimeScope(object):
     
     def lookup_here(self, name):
         return self.entries[name]
+        
+    def __contains__(self, name):
+        return name in self.entries
     
     def lookup(self, name):
         try:
@@ -407,7 +414,7 @@ class PyrexScanner(Scanner):
             sy, systring = self.read()
         except UnrecognizedInput:
             self.error("Unrecognized character")
-        if sy == 'IDENT':
+        if sy == IDENT:
             if systring in resword_dict:
                 sy = systring
             else:
@@ -447,7 +454,7 @@ class PyrexScanner(Scanner):
             self.expected(what, message)
     
     def expect_keyword(self, what, message = None):
-        if self.sy == 'IDENT' and self.systring == what:
+        if self.sy == IDENT and self.systring == what:
             self.next()
         else:
             self.expected(what, message)

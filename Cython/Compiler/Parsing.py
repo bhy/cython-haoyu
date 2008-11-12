@@ -1,12 +1,17 @@
+# cython: auto_cpdef=True
 #
 #   Pyrex Parser
 #
+
+# This should be done automatically
+import cython
+cython.declare(Nodes=object, ExprNodes=object, EncodedString=object)
 
 import os
 import re
 import sys
 from types import ListType, TupleType
-from Scanning import PyrexScanner, FileSourceDescriptor
+from Cython.Compiler.Scanning import PyrexScanner, FileSourceDescriptor
 import Nodes
 import ExprNodes
 import StringEncoding
@@ -527,26 +532,22 @@ def p_atom(s):
 
 def p_name(s, name):
     pos = s.position()
-    if not s.compile_time_expr:
-        try:
-            value = s.compile_time_env.lookup_here(name)
-        except KeyError:
-            pass
+    if not s.compile_time_expr and name in s.compile_time_env:
+        value = s.compile_time_env.lookup_here(name)
+        rep = repr(value)
+        if isinstance(value, bool):
+            return ExprNodes.BoolNode(pos, value = value)
+        elif isinstance(value, int):
+            return ExprNodes.IntNode(pos, value = rep)
+        elif isinstance(value, long):
+            return ExprNodes.IntNode(pos, value = rep, longness = "L")
+        elif isinstance(value, float):
+            return ExprNodes.FloatNode(pos, value = rep)
+        elif isinstance(value, (str, unicode)):
+            return ExprNodes.StringNode(pos, value = value)
         else:
-            rep = repr(value)
-            if isinstance(value, bool):
-                return ExprNodes.BoolNode(pos, value = value)
-            elif isinstance(value, int):
-                return ExprNodes.IntNode(pos, value = rep)
-            elif isinstance(value, long):
-                return ExprNodes.IntNode(pos, value = rep, longness = "L")
-            elif isinstance(value, float):
-                return ExprNodes.FloatNode(pos, value = rep)
-            elif isinstance(value, (str, unicode)):
-                return ExprNodes.StringNode(pos, value = value)
-            else:
-                error(pos, "Invalid type for compile-time constant: %s"
-                    % value.__class__.__name__)
+            error(pos, "Invalid type for compile-time constant: %s"
+                % value.__class__.__name__)
     return ExprNodes.NameNode(pos, name = name)
 
 def p_cat_string_literal(s):
@@ -1322,7 +1323,7 @@ def p_with_statement(s):
             if not allow_multi and isinstance(target, ExprNodes.TupleNode):
                 s.error("Multiple with statement target values not allowed without paranthesis")
         body = p_suite(s)
-	return Nodes.WithStatNode(pos, manager = manager, 
+    return Nodes.WithStatNode(pos, manager = manager, 
 	       			       target = target, body = body)
     
 def p_simple_statement(s, first_statement = 0):
@@ -2399,7 +2400,7 @@ def p_code(s, level=None):
             repr(s.sy), repr(s.systring)))
     return body
 
-COMPILER_DIRECTIVE_COMMENT_RE = re.compile(r"^#\s*cython:\s*([a-z]+)\s*=(.*)$")
+COMPILER_DIRECTIVE_COMMENT_RE = re.compile(r"^#\s*cython:\s*([a-z_]+)\s*=(.*)$")
 
 def p_compiler_directive_comments(s):
     result = {}
