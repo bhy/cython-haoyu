@@ -82,7 +82,8 @@ class Context:
         from ParseTreeTransforms import InterpretCompilerDirectives, TransformBuiltinMethods
         from ParseTreeTransforms import AlignFunctionDefinitions
         from AutoDocTransforms import EmbedSignature
-        from Optimize import FlattenInListTransform, SwitchTransform, FinalOptimizePhase
+        from Optimize import FlattenInListTransform, SwitchTransform, DictIterTransform
+        from Optimize import FinalOptimizePhase
         from Buffer import IntroduceBufferAuxiliaryVars
         from ModuleNode import check_c_declarations
 
@@ -102,8 +103,8 @@ class Context:
             NormalizeTree(self),
             PostParse(self),
             _specific_post_parse,
-            _align_function_definitions,
             InterpretCompilerDirectives(self, self.pragma_overrides),
+            _align_function_definitions,
             FlattenInListTransform(),
             WithTransform(self),
             DecoratorTransform(self),
@@ -113,6 +114,7 @@ class Context:
             IntroduceBufferAuxiliaryVars(self),
             _check_c_declarations,
             AnalyseExpressionsTransform(self),
+            DictIterTransform(),
             SwitchTransform(),
             FinalOptimizePhase(self),
 #            SpecialFunctions(self),
