@@ -1,12 +1,17 @@
+# cython: auto_cpdef=True
 #
 #   Pyrex Parser
 #
+
+# This should be done automatically
+import cython
+cython.declare(Nodes=object, ExprNodes=object, EncodedString=object)
 
 import os
 import re
 import sys
 from types import ListType, TupleType
-from Scanning import PyrexScanner, FileSourceDescriptor
+from Cython.Compiler.Scanning import PyrexScanner, FileSourceDescriptor
 import Nodes
 import ExprNodes
 import StringEncoding
@@ -264,6 +269,15 @@ def p_sizeof(s):
     s.expect(')')
     return node
 
+def p_yield_expression(s):
+    # s.sy == "yield"
+    pos = s.position()
+    s.next()
+    if s.sy not in ('EOF', 'NEWLINE', ')'):
+        expr = p_expr(s)
+    s.error("generators ('yield') are not currently supported")
+    return Nodes.PassStatNode(pos)
+
 #power: atom trailer* ('**' factor)*
 
 def p_power(s):
@@ -468,6 +482,8 @@ def p_atom(s):
         s.next()
         if s.sy == ')':
             result = ExprNodes.TupleNode(pos, args = [])
+        elif s.sy == 'yield':
+            result = p_yield_expression(s)
         else:
             result = p_expr(s)
         s.expect(')')
@@ -527,26 +543,22 @@ def p_atom(s):
 
 def p_name(s, name):
     pos = s.position()
-    if not s.compile_time_expr:
-        try:
-            value = s.compile_time_env.lookup_here(name)
-        except KeyError:
-            pass
+    if not s.compile_time_expr and name in s.compile_time_env:
+        value = s.compile_time_env.lookup_here(name)
+        rep = repr(value)
+        if isinstance(value, bool):
+            return ExprNodes.BoolNode(pos, value = value)
+        elif isinstance(value, int):
+            return ExprNodes.IntNode(pos, value = rep)
+        elif isinstance(value, long):
+            return ExprNodes.IntNode(pos, value = rep, longness = "L")
+        elif isinstance(value, float):
+            return ExprNodes.FloatNode(pos, value = rep)
+        elif isinstance(value, (str, unicode)):
+            return ExprNodes.StringNode(pos, value = value)
         else:
-            rep = repr(value)
-            if isinstance(value, bool):
-                return ExprNodes.BoolNode(pos, value = value)
-            elif isinstance(value, int):
-                return ExprNodes.IntNode(pos, value = rep)
-            elif isinstance(value, long):
-                return ExprNodes.IntNode(pos, value = rep, longness = "L")
-            elif isinstance(value, float):
-                return ExprNodes.FloatNode(pos, value = rep)
-            elif isinstance(value, (str, unicode)):
-                return ExprNodes.StringNode(pos, value = value)
-            else:
-                error(pos, "Invalid type for compile-time constant: %s"
-                    % value.__class__.__name__)
+            error(pos, "Invalid type for compile-time constant: %s"
+                % value.__class__.__name__)
     return ExprNodes.NameNode(pos, name = name)
 
 def p_cat_string_literal(s):
@@ -902,6 +914,21 @@ def p_print_statement(s):
     return Nodes.PrintStatNode(pos,
         arg_tuple = arg_tuple, append_newline = not ends_with_comma)
 
+def p_exec_statement(s):
+    # s.sy == 'exec'
+    pos = s.position()
+    s.next()
+    args = [ p_bit_expr(s) ]
+    if s.sy == 'in':
+        s.next()
+        args.append(p_simple_expr(s))
+        if s.sy == ',':
+            s.next()
+            args.append(p_simple_expr(s))
+    else:
+        error(pos, "'exec' currently requires a target mapping (globals/locals)")
+    return Nodes.ExecStatNode(pos, args = args)
+
 def p_del_statement(s):
     # s.sy == 'del'
     pos = s.position()
@@ -980,7 +1007,8 @@ def p_import_statement(s):
         else:
             if as_name and "." in dotted_name:
                 name_list = ExprNodes.ListNode(pos, args = [
-                    ExprNodes.StringNode(pos, value = EncodedString("*"))])
+                        ExprNodes.IdentifierStringNode(
+                            pos, value = EncodedString("*"))])
             else:
                 name_list = None
             stat = Nodes.SingleAssignmentNode(pos,
@@ -1005,14 +1033,20 @@ def p_from_import_statement(s, first_statement = 0):
     else:
         s.error("Expected 'import' or 'cimport'")
     is_cimport = kind == 'cimport'
+    is_parenthesized = False
     if s.sy == '*':
         imported_names = [(s.position(), "*", None, None)]
         s.next()
     else:
+        if s.sy == '(':
+            is_parenthesized = True
+            s.next()
         imported_names = [p_imported_name(s, is_cimport)]
     while s.sy == ',':
         s.next()
         imported_names.append(p_imported_name(s, is_cimport))
+    if is_parenthesized:
+        s.expect(')')
     dotted_name = EncodedString(dotted_name)
     if dotted_name == '__future__':
         if not first_statement:
@@ -1307,7 +1341,7 @@ def p_with_statement(s):
             if not allow_multi and isinstance(target, ExprNodes.TupleNode):
                 s.error("Multiple with statement target values not allowed without paranthesis")
         body = p_suite(s)
-	return Nodes.WithStatNode(pos, manager = manager, 
+    return Nodes.WithStatNode(pos, manager = manager, 
 	       			       target = target, body = body)
     
 def p_simple_statement(s, first_statement = 0):
@@ -1316,6 +1350,8 @@ def p_simple_statement(s, first_statement = 0):
         node = p_global_statement(s)
     elif s.sy == 'print':
         node = p_print_statement(s)
+    elif s.sy == 'exec':
+        node = p_exec_statement(s)
     elif s.sy == 'del':
         node = p_del_statement(s)
     elif s.sy == 'break':
@@ -1330,6 +1366,8 @@ def p_simple_statement(s, first_statement = 0):
         node = p_import_statement(s)
     elif s.sy == 'from':
         node = p_from_import_statement(s, first_statement = first_statement)
+    elif s.sy == 'yield':
+        node = p_yield_expression(s)
     elif s.sy == 'assert':
         node = p_assert_statement(s)
     elif s.sy == 'pass':
@@ -2128,7 +2166,7 @@ def p_c_func_or_var_declaration(s, pos, ctx):
                                 assignable = 1, nonempty = 1)
     declarator.overridable = ctx.overridable
     if s.sy == ':':
-        if ctx.level not in ('module', 'c_class'):
+        if ctx.level not in ('module', 'c_class', 'module_pxd', 'c_class_pxd'):
             s.error("C function definition not allowed here")
         doc, suite = p_suite(s, Ctx(level = 'function'), with_doc = 1)
         result = Nodes.CFuncDefNode(pos,
@@ -2382,7 +2420,7 @@ def p_code(s, level=None):
             repr(s.sy), repr(s.systring)))
     return body
 
-COMPILER_DIRECTIVE_COMMENT_RE = re.compile(r"^#\s*cython:\s*([a-z]+)\s*=(.*)$")
+COMPILER_DIRECTIVE_COMMENT_RE = re.compile(r"^#\s*cython:\s*([a-z_]+)\s*=(.*)$")
 
 def p_compiler_directive_comments(s):
     result = {}

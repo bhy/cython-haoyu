@@ -2,6 +2,11 @@ import Nodes
 import ExprNodes
 import PyrexTypes
 import Visitor
+import Builtin
+import UtilNodes
+import TypeSlots
+import Symtab
+from StringEncoding import EncodedString
 
 def unwrap_node(node):
     while isinstance(node, ExprNodes.PersistentNode):
@@ -16,6 +21,207 @@ def is_common_value(a, b):
     if isinstance(a, ExprNodes.AttributeNode) and isinstance(b, ExprNodes.AttributeNode):
         return not a.is_py_attr and is_common_value(a.obj, b.obj) and a.attribute == b.attribute
     return False
+
+
+class DictIterTransform(Visitor.VisitorTransform):
+    """Transform a for-in-dict loop into a while loop calling PyDict_Next().
+    """
+    PyDict_Next_func_type = PyrexTypes.CFuncType(
+        PyrexTypes.c_bint_type, [
+            PyrexTypes.CFuncTypeArg("dict",  PyrexTypes.py_object_type, None),
+            PyrexTypes.CFuncTypeArg("pos",   PyrexTypes.c_py_ssize_t_ptr_type, None),
+            PyrexTypes.CFuncTypeArg("key",   PyrexTypes.CPtrType(PyrexTypes.py_object_type), None),
+            PyrexTypes.CFuncTypeArg("value", PyrexTypes.CPtrType(PyrexTypes.py_object_type), None)
+            ])
+
+    PyDict_Next_name = EncodedString("PyDict_Next")
+
+    PyDict_Next_entry = Symtab.Entry(
+        PyDict_Next_name, PyDict_Next_name, PyDict_Next_func_type)
+
+    def visit_ForInStatNode(self, node):
+        self.visitchildren(node)
+        iterator = node.iterator.sequence
+        if iterator.type is Builtin.dict_type:
+            # like iterating over dict.keys()
+            dict_obj = iterator
+            keys = True
+            values = False
+        else:
+            if not isinstance(iterator, ExprNodes.SimpleCallNode):
+                return node
+            function = iterator.function
+            if not isinstance(function, ExprNodes.AttributeNode):
+                return node
+            if function.obj.type != Builtin.dict_type:
+                return node
+            dict_obj = function.obj
+            method = function.attribute
+
+            keys = values = False
+            if method == 'iterkeys':
+                keys = True
+            elif method == 'itervalues':
+                values = True
+            elif method == 'iteritems':
+                keys = values = True
+            else:
+                return node
+
+        py_object_ptr = PyrexTypes.c_void_ptr_type
+
+        temps = []
+        temp = UtilNodes.TempHandle(PyrexTypes.py_object_type)
+        temps.append(temp)
+        dict_temp = temp.ref(dict_obj.pos)
+        pos_temp = node.iterator.counter
+        pos_temp_addr = ExprNodes.AmpersandNode(
+            node.pos, operand=pos_temp,
+            type=PyrexTypes.c_ptr_type(PyrexTypes.c_py_ssize_t_type))
+        if keys:
+            temp = UtilNodes.TempHandle(py_object_ptr)
+            temps.append(temp)
+            key_temp = temp.ref(node.target.pos)
+            key_temp_addr = ExprNodes.AmpersandNode(
+                node.target.pos, operand=key_temp,
+                type=PyrexTypes.c_ptr_type(py_object_ptr))
+        else:
+            key_temp_addr = key_temp = ExprNodes.NullNode(
+                pos=node.target.pos)
+        if values:
+            temp = UtilNodes.TempHandle(py_object_ptr)
+            temps.append(temp)
+            value_temp = temp.ref(node.target.pos)
+            value_temp_addr = ExprNodes.AmpersandNode(
+                node.target.pos, operand=value_temp,
+                type=PyrexTypes.c_ptr_type(py_object_ptr))
+        else:
+            value_temp_addr = value_temp = ExprNodes.NullNode(
+                pos=node.target.pos)
+
+        key_target = value_target = node.target
+        tuple_target = None
+        if keys and values:
+            if node.target.is_sequence_constructor:
+                if len(node.target.args) == 2:
+                    key_target, value_target = node.target.args
+                else:
+                    # unusual case that may or may not lead to an error
+                    return node
+            else:
+                tuple_target = node.target
+
+        def coerce_object_to(obj_node, dest_type):
+            class FakeEnv(object):
+                nogil = False
+            if dest_type.is_pyobject:
+                coercion = None
+                if dest_type.is_extension_type or dest_type.is_builtin_type:
+                    coercion = ExprNodes.PyTypeTestNode(obj_node, dest_type, FakeEnv())
+                result = ExprNodes.TypecastNode(
+                    obj_node.pos,
+                    operand = obj_node,
+                    type = dest_type)
+                return (result, coercion)
+            else:
+                temp = UtilNodes.TempHandle(dest_type)
+                temps.append(temp)
+                temp_result = temp.ref(obj_node.pos)
+                class CoercedTempNode(ExprNodes.CoerceFromPyTypeNode):
+                    def result(self):
+                        return temp_result.result()
+                    def generate_execution_code(self, code):
+                        self.generate_result_code(code)
+                return (temp_result, CoercedTempNode(dest_type, obj_node, FakeEnv()))
+
+        if isinstance(node.body, Nodes.StatListNode):
+            body = node.body
+        else:
+            body = Nodes.StatListNode(pos = node.body.pos,
+                                      stats = [node.body])
+
+        if tuple_target:
+            temp = UtilNodes.TempHandle(PyrexTypes.py_object_type)
+            temps.append(temp)
+            temp_tuple = temp.ref(tuple_target.pos)
+            class TempTupleNode(ExprNodes.TupleNode):
+                # FIXME: remove this after result-code refactoring
+                def result(self):
+                    return temp_tuple.result()
+
+            tuple_result = TempTupleNode(
+                pos = tuple_target.pos,
+                args = [key_temp, value_temp],
+                is_temp = 1,
+                type = Builtin.tuple_type,
+                )
+            body.stats.insert(0, Nodes.SingleAssignmentNode(
+                    pos = tuple_target.pos,
+                    lhs = tuple_target,
+                    rhs = tuple_result))
+        else:
+            # execute all coercions before the assignments
+            coercion_stats = []
+            assign_stats = []
+            if keys:
+                temp_result, coercion = coerce_object_to(
+                    key_temp, key_target.type)
+                if coercion:
+                    coercion_stats.append(coercion)
+                assign_stats.append(
+                    Nodes.SingleAssignmentNode(
+                        pos = key_temp.pos,
+                        lhs = key_target,
+                        rhs = temp_result))
+            if values:
+                temp_result, coercion = coerce_object_to(
+                    value_temp, value_target.type)
+                if coercion:
+                    coercion_stats.append(coercion)
+                assign_stats.append(
+                    Nodes.SingleAssignmentNode(
+                        pos = value_temp.pos,
+                        lhs = value_target,
+                        rhs = temp_result))
+            body.stats[0:0] = coercion_stats + assign_stats
+
+        result_code = [
+            Nodes.SingleAssignmentNode(
+                pos = node.pos,
+                lhs = pos_temp,
+                rhs = ExprNodes.IntNode(node.pos, value=0)),
+            Nodes.SingleAssignmentNode(
+                pos = dict_obj.pos,
+                lhs = dict_temp,
+                rhs = dict_obj),
+            Nodes.WhileStatNode(
+                pos = node.pos,
+                condition = ExprNodes.SimpleCallNode(
+                    pos = dict_obj.pos,
+                    type = PyrexTypes.c_bint_type,
+                    function = ExprNodes.NameNode(
+                        pos = dict_obj.pos,
+                        name = self.PyDict_Next_name,
+                        type = self.PyDict_Next_func_type,
+                        entry = self.PyDict_Next_entry),
+                    args = [dict_temp, pos_temp_addr,
+                            key_temp_addr, value_temp_addr]
+                    ),
+                body = body,
+                else_clause = node.else_clause
+                )
+            ]
+
+        return UtilNodes.TempsBlockNode(
+            node.pos, temps=temps,
+            body=Nodes.StatListNode(
+                pos = node.pos,
+                stats = result_code
+                ))
+
+    def visit_Node(self, node):
+        self.visitchildren(node)
+        return node
 
 
 class SwitchTransform(Visitor.VisitorTransform):

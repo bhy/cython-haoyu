@@ -29,9 +29,19 @@ try:
     sys.argv.remove("--no-cython-compile")
 except ValueError:
     try:
+        from distutils.command.build_ext import build_ext as build_ext_orig
+        class build_ext(build_ext_orig):
+            def build_extension(self, ext, *args, **kargs):
+                try:
+                    build_ext_orig.build_extension(self, ext, *args, **kargs)
+                except StandardError:
+                    print("Compilation of '%s' failed" % ext.sources[0])
         from Cython.Compiler.Main import compile
         source_root = os.path.dirname(__file__)
-        compiled_modules = ["Cython.Plex.Scanners"]
+        compiled_modules = ["Cython.Plex.Scanners",
+                            "Cython.Compiler.Scanning",
+                            "Cython.Compiler.Parsing",
+                            "Cython.Compiler.Visitor"]
         extensions = []
         for module in compiled_modules:
             source_file = os.path.join(source_root, *module.split('.'))
@@ -45,6 +55,7 @@ except ValueError:
                 print("Compilation failed")
         if extensions:
             setup_args['ext_modules'] = extensions
+            setup_args['cmdclass'] = {"build_ext" : build_ext}
     except Exception:
         print("ERROR: %s" % sys.exc_info()[1])
         print("Extension module compilation failed, using plain Python implementation")

@@ -899,7 +899,7 @@ class LongNode(AtomicExprNode):
 
     def generate_evaluation_code(self, code):
         code.putln(
-            '%s = PyLong_FromString("%s", 0, 0); %s' % (
+            '%s = PyLong_FromString((char *)"%s", 0, 0); %s' % (
                 self.result(),
                 self.value,
                 code.error_goto_if_null(self.result(), self.pos)))
@@ -1340,10 +1340,16 @@ class IteratorNode(ExprNode):
         self.counter.release_temp(env)
     
     def generate_result_code(self, code):
-        code.putln(
-            "if (PyList_CheckExact(%s) || PyTuple_CheckExact(%s)) {" % (
-                self.sequence.py_result(),
-                self.sequence.py_result()))
+        is_builtin_sequence = self.sequence.type is list_type or \
+            self.sequence.type is tuple_type
+        if is_builtin_sequence:
+            code.putln(
+                "if (likely(%s != Py_None)) {" % self.sequence.py_result())
+        else:
+            code.putln(
+                "if (PyList_CheckExact(%s) || PyTuple_CheckExact(%s)) {" % (
+                    self.sequence.py_result(),
+                    self.sequence.py_result()))
         code.putln(
             "%s = 0; %s = %s; Py_INCREF(%s);" % (
                 self.counter.result(),
@@ -1351,11 +1357,16 @@ class IteratorNode(ExprNode):
                 self.sequence.py_result(),
                 self.result()))
         code.putln("} else {")
-        code.putln("%s = -1; %s = PyObject_GetIter(%s); %s" % (
-                self.counter.result(),
-                self.result(),
-                self.sequence.py_result(),
-                code.error_goto_if_null(self.result(), self.pos)))
+        if is_builtin_sequence:
+            code.putln(
+                'PyErr_SetString(PyExc_TypeError, "\'NoneType\' object is not iterable"); %s' %
+                code.error_goto(self.pos))
+        else:
+            code.putln("%s = -1; %s = PyObject_GetIter(%s); %s" % (
+                    self.counter.result(),
+                    self.result(),
+                    self.sequence.py_result(),
+                    code.error_goto_if_null(self.result(), self.pos)))
         code.putln("}")
 
 
@@ -1374,23 +1385,35 @@ class NextNode(AtomicExprNode):
         self.is_temp = 1
     
     def generate_result_code(self, code):
-        for py_type in ["List", "Tuple"]:
-            code.putln(
-                "if (likely(Py%s_CheckExact(%s))) {" % (py_type, self.iterator.py_result()))
+        if self.iterator.sequence.type is list_type:
+            type_checks = [(list_type, "List")]
+        elif self.iterator.sequence.type is tuple_type:
+            type_checks = [(tuple_type, "Tuple")]
+        else:
+            type_checks = [(list_type, "List"), (tuple_type, "Tuple")]
+
+        for py_type, prefix in type_checks:
+            if len(type_checks) > 1:
+                code.putln(
+                    "if (likely(Py%s_CheckExact(%s))) {" % (
+                        prefix, self.iterator.py_result()))
             code.putln(
                 "if (%s >= Py%s_GET_SIZE(%s)) break;" % (
                     self.iterator.counter.result(),
-                    py_type,
+                    prefix,
                     self.iterator.py_result()))
             code.putln(
                 "%s = Py%s_GET_ITEM(%s, %s); Py_INCREF(%s); %s++;" % (
                     self.result(),
-                    py_type,
+                    prefix,
                     self.iterator.py_result(),
                     self.iterator.counter.result(),
                     self.result(),
                     self.iterator.counter.result()))
-            code.put("} else ")
+            if len(type_checks) > 1:
+                code.put("} else ")
+        if len(type_checks) == 1:
+            return
         code.putln("{")
         code.putln(
             "%s = PyIter_Next(%s);" % (
@@ -1656,8 +1679,19 @@ class IndexNode(ExprNode):
             index_code = self.index.result()
             code.globalstate.use_utility_code(setitem_int_utility_code)
         else:
-            function = "PyObject_SetItem"
             index_code = self.index.py_result()
+            if self.base.type is dict_type:
+                function = "PyDict_SetItem"
+            elif self.base.type is list_type:
+                function = "PyList_SetItem"
+            # don't use PyTuple_SetItem(), as we'd normally get a
+            # TypeError when changing a tuple, while PyTuple_SetItem()
+            # would allow updates
+            #
+            #elif self.base.type is tuple_type:
+            #    function = "PyTuple_SetItem"
+            else:
+                function = "PyObject_SetItem"
         code.putln(
             "if (%s(%s, %s, %s%s) < 0) %s" % (
                 function,
@@ -1713,8 +1747,11 @@ class IndexNode(ExprNode):
             index_code = self.index.result()
             code.globalstate.use_utility_code(delitem_int_utility_code)
         else:
-            function = "PyObject_DelItem"
             index_code = self.index.py_result()
+            if self.base.type is dict_type:
+                function = "PyDict_DelItem"
+            else:
+                function = "PyObject_DelItem"
         code.putln(
             "if (%s(%s, %s%s) < 0) %s" % (
                 function,
@@ -1779,19 +1816,29 @@ class SliceIndexNode(ExprNode):
             self.start.analyse_types(env)
         if self.stop:
             self.stop.analyse_types(env)
-        self.base = self.base.coerce_to_pyobject(env)
+        if self.base.type.is_array or self.base.type.is_ptr:
+            # we need a ptr type here instead of an array type, as
+            # array types can result in invalid type casts in the C
+            # code
+            self.type = PyrexTypes.CPtrType(self.base.type.base_type)
+        else:
+            self.base = self.base.coerce_to_pyobject(env)
+            self.type = py_object_type
         c_int = PyrexTypes.c_py_ssize_t_type
         if self.start:
             self.start = self.start.coerce_to(c_int, env)
         if self.stop:
             self.stop = self.stop.coerce_to(c_int, env)
-        self.type = py_object_type
         self.gil_check(env)
         self.is_temp = 1
 
     gil_message = "Slicing Python object"
 
     def generate_result_code(self, code):
+        if not self.type.is_pyobject:
+            error(self.pos,
+                  "Slicing is not currently supported for '%s'." % self.type)
+            return
         code.putln(
             "%s = PySequence_GetSlice(%s, %s, %s); %s" % (
                 self.result(),
@@ -1802,16 +1849,40 @@ class SliceIndexNode(ExprNode):
     
     def generate_assignment_code(self, rhs, code):
         self.generate_subexpr_evaluation_code(code)
-        code.put_error_if_neg(self.pos, 
-            "PySequence_SetSlice(%s, %s, %s, %s)" % (
-                self.base.py_result(),
-                self.start_code(),
-                self.stop_code(),
-                rhs.result()))
+        if self.type.is_pyobject:
+            code.put_error_if_neg(self.pos, 
+                "PySequence_SetSlice(%s, %s, %s, %s)" % (
+                    self.base.py_result(),
+                    self.start_code(),
+                    self.stop_code(),
+                    rhs.result()))
+        else:
+            start_offset = ''
+            if self.start:
+                start_offset = self.start_code()
+                if start_offset == '0':
+                    start_offset = ''
+                else:
+                    start_offset += '+'
+            if rhs.type.is_array:
+                array_length = rhs.type.size
+                self.generate_slice_guard_code(code, array_length)
+            else:
+                error("Slice assignments from pointers are not yet supported.")
+                # FIXME: fix the array size according to start/stop
+                array_length = self.base.type.size
+            for i in range(array_length):
+                code.putln("%s[%s%s] = %s[%d];" % (
+                        self.base.result(), start_offset, i,
+                        rhs.result(), i))
         self.generate_subexpr_disposal_code(code)
         rhs.generate_disposal_code(code)
 
     def generate_deletion_code(self, code):
+        if not self.type.is_pyobject:
+            error(self.pos,
+                  "Deleting slices is only supported for Python types, not '%s'." % self.type)
+            return
         self.generate_subexpr_evaluation_code(code)
         code.put_error_if_neg(self.pos,
             "PySequence_DelSlice(%s, %s, %s)" % (
@@ -1819,6 +1890,54 @@ class SliceIndexNode(ExprNode):
                 self.start_code(),
                 self.stop_code()))
         self.generate_subexpr_disposal_code(code)
+
+    def generate_slice_guard_code(self, code, target_size):
+        if not self.base.type.is_array:
+            return
+        slice_size = self.base.type.size
+        start = stop = None
+        if self.stop:
+            stop = self.stop.result()
+            try:
+                stop = int(stop)
+                if stop < 0:
+                    slice_size = self.base.type.size + stop
+                else:
+                    slice_size = stop
+                stop = None
+            except ValueError:
+                pass
+        if self.start:
+            start = self.start.result()
+            try:
+                start = int(start)
+                if start < 0:
+                    start = self.base.type.size + start
+                slice_size -= start
+                start = None
+            except ValueError:
+                pass
+        check = None
+        if slice_size < 0:
+            if target_size > 0:
+                error(self.pos, "Assignment to empty slice.")
+        elif start is None and stop is None:
+            # we know the exact slice length
+            if target_size != slice_size:
+                error(self.pos, "Assignment to slice of wrong length, expected %d, got %d" % (
+                        slice_size, target_size))
+        elif start is not None:
+            if stop is None:
+                stop = slice_size
+            check = "(%s)-(%s)" % (stop, start)
+        else: # stop is not None:
+            check = stop
+        if check:
+            code.putln("if (unlikely((%s) != %d)) {" % (check, target_size))
+            code.putln('PyErr_Format(PyExc_ValueError, "Assignment to slice of wrong length, expected %%d, got %%d", %d, (%s));' % (
+                        target_size, check))
+            code.putln(code.error_goto(self.pos))
+            code.putln("}")
     
     def start_code(self):
         if self.start:
@@ -1829,6 +1948,8 @@ class SliceIndexNode(ExprNode):
     def stop_code(self):
         if self.stop:
             return self.stop.result()
+        elif self.base.type.is_array:
+            return self.base.type.size
         else:
             return "PY_SSIZE_T_MAX"
     
@@ -2639,13 +2760,15 @@ class SequenceNode(ExprNode):
         self.iterator.allocate_temps(env)
         for arg, node in zip(self.args, self.coerced_unpacked_items):
             node.allocate_temps(env)
-            arg.allocate_target_temps(env, node)
+            arg.allocate_target_temps(env, None)
             #arg.release_target_temp(env)
             #node.release_temp(env)
         if rhs:
             rhs.release_temp(env)
         self.iterator.release_temp(env)
-    
+        for node in self.coerced_unpacked_items:
+            node.release_temp(env)
+
 #	def release_target_temp(self, env):
 #		#for arg in self.args:
 #		#	arg.release_target_temp(env)
@@ -2665,18 +2788,16 @@ class SequenceNode(ExprNode):
         code.putln("PyObject* tuple = %s;" % rhs.py_result())
         for i in range(len(self.args)):
             item = self.unpacked_items[i]
-            code.putln(
-                "%s = PyTuple_GET_ITEM(tuple, %s);" % (
+            code.put(
+                "%s = PyTuple_GET_ITEM(tuple, %s); " % (
                     item.result(),
                     i))
             code.put_incref(item.result(), item.ctype())
             value_node = self.coerced_unpacked_items[i]
             value_node.generate_evaluation_code(code)
-            self.args[i].generate_assignment_code(value_node, code)
-            
         rhs.generate_disposal_code(code)
-        code.putln("}")
-        code.putln("else {")
+
+        code.putln("} else {")
 
         code.putln(
             "%s = PyObject_GetIter(%s); %s" % (
@@ -2695,7 +2816,6 @@ class SequenceNode(ExprNode):
                     code.error_goto_if_null(item.result(), self.pos)))
             value_node = self.coerced_unpacked_items[i]
             value_node.generate_evaluation_code(code)
-            self.args[i].generate_assignment_code(value_node, code)
         code.put_error_if_neg(self.pos, 
             "__Pyx_EndUnpack(%s)" % (
                 self.iterator.py_result()))
@@ -2705,6 +2825,9 @@ class SequenceNode(ExprNode):
         self.iterator.generate_disposal_code(code)
 
         code.putln("}")
+        for i in range(len(self.args)):
+            self.args[i].generate_assignment_code(
+                self.coerced_unpacked_items[i], code)
         
     def annotate(self, code):
         for arg in self.args:
@@ -4381,8 +4504,6 @@ class PyTypeTestNode(CoercionNode):
         self.type = dst_type
         self.gil_check(env)
         self.result_ctype = arg.ctype()
-        if not dst_type.is_builtin_type:
-            env.use_utility_code(type_test_utility_code)
 
     gil_message = "Python type test"
     
@@ -4400,6 +4521,8 @@ class PyTypeTestNode(CoercionNode):
     
     def generate_result_code(self, code):
         if self.type.typeobj_is_available():
+            if not self.type.is_builtin_type:
+                code.globalstate.use_utility_code(type_test_utility_code)
             code.putln(
                 "if (!(%s)) %s" % (
                     self.type.type_test_code(self.arg.py_result()),
@@ -4692,8 +4815,8 @@ static PyObject *__Pyx_Import(PyObject *name, PyObject *from_list) {
     empty_dict = PyDict_New();
     if (!empty_dict)
         goto bad;
-    module = PyObject_CallFunction(__import__, "OOOO",
-        name, global_dict, empty_dict, list);
+    module = PyObject_CallFunctionObjArgs(__import__,
+        name, global_dict, empty_dict, list, NULL);
 bad:
     Py_XDECREF(empty_list);
     Py_XDECREF(__import__);
@@ -4810,11 +4933,11 @@ static int __Pyx_TypeTest(PyObject *obj, PyTypeObject *type) {
 
 create_class_utility_code = UtilityCode(
 proto = """
-static PyObject *__Pyx_CreateClass(PyObject *bases, PyObject *dict, PyObject *name, char *modname); /*proto*/
+static PyObject *__Pyx_CreateClass(PyObject *bases, PyObject *dict, PyObject *name, const char *modname); /*proto*/
 """,
 impl = """
 static PyObject *__Pyx_CreateClass(
-    PyObject *bases, PyObject *dict, PyObject *name, char *modname)
+    PyObject *bases, PyObject *dict, PyObject *name, const char *modname)
 {
     PyObject *py_modname;
     PyObject *result = 0;
@@ -4877,7 +5000,12 @@ static INLINE PyObject* __Pyx_PyObject_Append(PyObject* L, PyObject* x) {
         return Py_None; // this is just to have an accurate signature
     }
     else {
-        return PyObject_CallMethod(L, "append", "(O)", x);
+        PyObject *r, *m;
+        m = PyObject_GetAttrString(L, "append");
+        if (!m) return NULL;
+        r = PyObject_CallFunctionObjArgs(m, x, NULL);
+        Py_DECREF(m);
+        return r;
     }
 }
 """,
@@ -4968,10 +5096,10 @@ impl = """
 
 raise_noneattr_error_utility_code = UtilityCode(
 proto = """
-static INLINE void __Pyx_RaiseNoneAttributeError(char* attrname);
+static INLINE void __Pyx_RaiseNoneAttributeError(const char* attrname);
 """,
 impl = """
-static INLINE void __Pyx_RaiseNoneAttributeError(char* attrname) {
+static INLINE void __Pyx_RaiseNoneAttributeError(const char* attrname) {
     PyErr_Format(PyExc_AttributeError, "'NoneType' object has no attribute '%s'", attrname);
 }
 """)
