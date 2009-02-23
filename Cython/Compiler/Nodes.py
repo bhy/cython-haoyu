@@ -1233,14 +1233,17 @@ class FuncDefNode(StatNode, BlockNode):
             if default:
                 if not default.is_literal:
                     default.generate_evaluation_code(code)
-                    assign_code = "%s = %s;" % (
-                        arg.default_entry.cname,
-                        default.result_as(arg.default_entry.type))
-                    if default.type.is_pyobject:
-                        assign_code += " Py_INCREF(%s);" % \
-                            arg.type.as_pyobject(arg.default_entry.cname)
-                    code.putln(assign_code)
-                    default.generate_disposal_code(code)
+                    default.make_owned_reference(code)
+                    if default.is_temp and default.type.is_pyobject:
+                        cleanup = " %s = 0;" % default.result()
+                    else:
+                        cleanup = ''
+                    code.putln(
+                        "%s = %s;%s" % (
+                            arg.default_entry.cname,
+                            default.result_as(arg.default_entry.type),
+                            cleanup))
+                    code.put_giveref(arg.default_entry.cname)
                     default.free_temps(code)
         # For Python class methods, create and store function object
         if self.assmt:
