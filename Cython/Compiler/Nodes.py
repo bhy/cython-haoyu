@@ -3200,14 +3200,24 @@ class PrintStatNode(StatNode):
     gil_message = "Python print statement"
 
     def generate_execution_code(self, code):
-        self.arg_tuple.generate_evaluation_code(code)
-        code.putln(
-            "if (__Pyx_Print(%s, %d) < 0) %s" % (
-                self.arg_tuple.py_result(),
-                self.append_newline,
-                code.error_goto(self.pos)))
-        self.arg_tuple.generate_disposal_code(code)
-        self.arg_tuple.free_temps(code)
+        if len(self.arg_tuple.args) == 1 and self.append_newline:
+            arg = self.arg_tuple.args[0]
+            arg.generate_evaluation_code(code)
+            code.putln(
+                "if (__Pyx_PrintOne(%s) < 0) %s" % (
+                    arg.py_result(),
+                    code.error_goto(self.pos)))
+            arg.generate_disposal_code(code)
+            arg.free_temps(code)
+        else:
+            self.arg_tuple.generate_evaluation_code(code)
+            code.putln(
+                "if (__Pyx_Print(%s, %d) < 0) %s" % (
+                    self.arg_tuple.py_result(),
+                    self.append_newline,
+                    code.error_goto(self.pos)))
+            self.arg_tuple.generate_disposal_code(code)
+            self.arg_tuple.free_temps(code)
 
     def annotate(self, code):
         self.arg_tuple.annotate(code)
@@ -4039,6 +4049,7 @@ class TryExceptStatNode(StatNode):
     def generate_execution_code(self, code):
         old_return_label = code.return_label
         old_break_label = code.break_label
+        old_continue_label = code.continue_label
         old_error_label = code.new_error_label()
         our_error_label = code.error_label
         except_end_label = code.new_label('exception_handled')
@@ -4046,6 +4057,7 @@ class TryExceptStatNode(StatNode):
         except_return_label = code.new_label('except_return')
         try_return_label = code.new_label('try_return')
         try_break_label = code.new_label('try_break')
+        try_continue_label = code.new_label('try_continue')
         try_end_label = code.new_label('try_end')
 
         code.putln("{")
@@ -4059,6 +4071,7 @@ class TryExceptStatNode(StatNode):
             "/*try:*/ {")
         code.return_label = try_return_label
         code.break_label = try_break_label
+        code.continue_label = try_continue_label
         self.body.generate_execution_code(code)
         code.putln(
             "}")
@@ -4100,6 +4113,13 @@ class TryExceptStatNode(StatNode):
             code.putln("__Pyx_ExceptionReset(%s);" %
                        ', '.join(Naming.exc_save_vars))
             code.put_goto(old_break_label)
+            
+        if code.label_used(try_continue_label):
+            code.put_label(try_continue_label)
+            for var in Naming.exc_save_vars: code.put_xgiveref(var)
+            code.putln("__Pyx_ExceptionReset(%s);" %
+                       ', '.join(Naming.exc_save_vars))
+            code.put_goto(old_continue_label)
 
         if code.label_used(except_return_label):
             code.put_label(except_return_label)
@@ -4118,6 +4138,7 @@ class TryExceptStatNode(StatNode):
 
         code.return_label = old_return_label
         code.break_label = old_break_label
+        code.continue_label = old_continue_label
         code.error_label = old_error_label
 
     def annotate(self, code):
@@ -4219,6 +4240,11 @@ class ExceptClauseNode(Node):
             self.excinfo_tuple.generate_evaluation_code(code)
             self.excinfo_target.generate_assignment_code(self.excinfo_tuple, code)
 
+
+        old_break_label, old_continue_label = code.break_label, code.continue_label
+        code.break_label = code.new_label('except_break')
+        code.continue_label = code.new_label('except_continue')
+
         old_exc_vars = code.funcstate.exc_vars
         code.funcstate.exc_vars = self.exc_vars
         self.body.generate_execution_code(code)
@@ -4226,6 +4252,21 @@ class ExceptClauseNode(Node):
         for var in self.exc_vars:
             code.putln("__Pyx_DECREF(%s); %s = 0;" % (var, var))
         code.put_goto(end_label)
+        
+        if code.label_used(code.break_label):
+            code.put_label(code.break_label)
+            for var in self.exc_vars:
+                code.putln("__Pyx_DECREF(%s); %s = 0;" % (var, var))
+            code.put_goto(old_break_label)
+        code.break_label = old_break_label
+
+        if code.label_used(code.continue_label):
+            code.put_label(code.continue_label)
+            for var in self.exc_vars:
+                code.putln("__Pyx_DECREF(%s); %s = 0;" % (var, var))
+            code.put_goto(old_continue_label)
+        code.continue_label = old_continue_label
+        
         code.putln(
             "}")
 
@@ -4715,6 +4756,7 @@ else:
 printing_utility_code = UtilityCode(
 proto = """
 static int __Pyx_Print(PyObject *, int); /*proto*/
+static int __Pyx_PrintOne(PyObject *o); /*proto*/
 #if PY_MAJOR_VERSION >= 3
 static PyObject* %s = 0;
 static PyObject* %s = 0;
@@ -4762,7 +4804,23 @@ static int __Pyx_Print(PyObject *arg_tuple, int newline) {
     return 0;
 }
 
+static int __Pyx_PrintOne(PyObject *o) {
+    PyObject *f;
+    if (!(f = __Pyx_GetStdout()))
+        return -1;
+    if (PyFile_SoftSpace(f, 0)) {
+        if (PyFile_WriteString(" ", f) < 0)
+            return -1;
+    }
+    if (PyFile_WriteObject(o, f, Py_PRINT_RAW) < 0)
+        return -1;
+    if (PyFile_WriteString("\n", f) < 0)
+        return -1;
+    return 0;
+}
+
 #else /* Python 3 has a print function */
+
 static int __Pyx_Print(PyObject *arg_tuple, int newline) {
     PyObject* kwargs = 0;
     PyObject* result = 0;
@@ -4794,6 +4852,19 @@ static int __Pyx_Print(PyObject *arg_tuple, int newline) {
     Py_DECREF(result);
     return 0;
 }
+
+static int __Pyx_PrintOne(PyObject *o) {
+    int res;
+    PyObject* arg_tuple = PyTuple_New(1);
+    if (unlikely(!arg_tuple))
+        return -1;
+    Py_INCREF(o);
+    PyTuple_SET_ITEM(arg_tuple, 0, o);
+    res = __Pyx_Print(arg_tuple, 1);
+    Py_DECREF(arg_tuple);
+    return res;
+}
+
 #endif
 """ % {'BUILTINS'       : Naming.builtins_cname,
        'PRINT_FUNCTION' : Naming.print_function,
