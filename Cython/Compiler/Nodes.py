@@ -132,7 +132,8 @@ class Node(object):
     
     gil_message = "Operation"
 
-    def gil_check(self, env):
+    gil_check = None
+    def _gil_check(self, env):
         if env.nogil:
             self.gil_error()
 
@@ -299,38 +300,6 @@ class CompilerDirectivesNode(Node):
 class BlockNode(object):
     #  Mixin class for nodes representing a declaration block.
 
-    def generate_const_definitions(self, env, code):
-        if env.const_entries:
-            for entry in env.const_entries:
-                if not entry.is_interned:
-                    code.globalstate.add_const_definition(entry)
-
-    def generate_interned_string_decls(self, env, code):
-        entries = env.global_scope().new_interned_string_entries
-        if entries:
-            for entry in entries:
-                code.globalstate.add_interned_string_decl(entry)
-            del entries[:]
-
-    def generate_py_string_decls(self, env, code):
-        if env is None:
-            return # earlier error
-        entries = env.pystring_entries
-        if entries:
-            for entry in entries:
-                if not entry.is_interned:
-                    code.globalstate.add_py_string_decl(entry)
-
-    def generate_interned_num_decls(self, env, code):
-        #  Flush accumulated interned nums from the global scope
-        #  and generate declarations for them.
-        genv = env.global_scope()
-        entries = genv.interned_nums
-        if entries:
-            for entry in entries:
-                code.globalstate.add_interned_num_decl(entry)
-            del entries[:]
-
     def generate_cached_builtins_decls(self, env, code):
         entries = env.global_scope().undeclared_cached_builtins
         for entry in entries:
@@ -486,7 +455,7 @@ class CArrayDeclaratorNode(CDeclaratorNode):
             self.dimension.analyse_const_expression(env)
             if not self.dimension.type.is_int:
                 error(self.dimension.pos, "Array dimension not integer")
-            size = self.dimension.result()
+            size = self.dimension.get_constant_result_code()
             try:
                 size = int(size)
             except ValueError:
@@ -537,9 +506,6 @@ class CFuncDeclaratorNode(CDeclaratorNode):
             # Catch attempted C-style func(void) decl
             if type.is_void:
                 error(arg_node.pos, "Use spam() rather than spam(void) to declare a function with no arguments.")
-#            if type.is_pyobject and self.nogil:
-#                error(self.pos,
-#                    "Function with Python argument cannot be declared nogil")
             func_type_args.append(
                 PyrexTypes.CFuncTypeArg(name, type, arg_node.pos))
             if arg_node.default:
@@ -573,6 +539,7 @@ class CFuncDeclaratorNode(CDeclaratorNode):
         else:
             if self.exception_value:
                 self.exception_value.analyse_const_expression(env)
+                exc_val = self.exception_value.get_constant_result_code()
                 if self.exception_check == '+':
                     exc_val_type = self.exception_value.type
                     env.add_include_file('stdexcept')
@@ -581,12 +548,10 @@ class CFuncDeclaratorNode(CDeclaratorNode):
                           not (exc_val_type.is_cfunction and not exc_val_type.return_type.is_pyobject and len(exc_val_type.args)==0):
                         error(self.exception_value.pos,
                             "Exception value must be a Python exception or cdef function with no arguments.")
-                    exc_val = self.exception_value
                 else:
-                    exc_val = self.exception_value.result()
                     if not return_type.assignable_from(self.exception_value.type):
                         error(self.exception_value.pos,
-                            "Exception value incompatible with function return type")
+                              "Exception value incompatible with function return type")
             exc_check = self.exception_check
         if return_type.is_array:
             error(self.pos,
@@ -612,8 +577,7 @@ class CArgDeclNode(Node):
     # declarator     CDeclaratorNode
     # not_none       boolean            Tagged with 'not None'
     # default        ExprNode or None
-    # default_entry  Symtab.Entry       Entry for the variable holding the default value
-    # default_result_code string        cname or code fragment for default value
+    # default_value  PyObjectConst      constant for default value
     # is_self_arg    boolean            Is the "self" arg of an extension type method
     # is_kw_only     boolean            Is a keyword-only argument
 
@@ -623,6 +587,7 @@ class CArgDeclNode(Node):
     is_generic = 1
     type = None
     name_declarator = None
+    default_value = None
 
     def analyse(self, env, nonempty = 0):
         #print "CArgDeclNode.analyse: is_self_arg =", self.is_self_arg ###
@@ -643,6 +608,16 @@ class CArgDeclNode(Node):
             return self.declarator.analyse(base_type, env, nonempty = nonempty)
         else:
             return self.name_declarator, self.type
+
+    def calculate_default_value_code(self, code):
+        if self.default_value is None:
+            if self.default:
+                if self.default.is_literal:
+                    # will not output any code, just assign the result_code
+                    self.default.generate_evaluation_code(code)
+                    return self.type.cast_code(self.default.result())
+                self.default_value = code.get_argument_default_const(self.type)
+        return self.default_value
 
     def annotate(self, code):
         if self.default:
@@ -870,10 +845,12 @@ class CStructOrUnionDefNode(StatNode):
                 if need_typedef_indirection:
                     # C can't handle typedef structs that refer to themselves. 
                     struct_entry = self.entry
-                    cname = env.new_const_cname()
-                    self.entry = env.declare_typedef(self.name, struct_entry.type, self.pos, cname = self.cname, visibility='ignore')
+                    self.entry = env.declare_typedef(
+                        self.name, struct_entry.type, self.pos,
+                        cname = self.cname, visibility='ignore')
                     struct_entry.type.typedef_flag = False
-                    struct_entry.cname = struct_entry.type.cname = env.new_const_cname()
+                    # FIXME: this might be considered a hack ;-)
+                    struct_entry.cname = struct_entry.type.cname = '_' + self.cname
     
     def analyse_expressions(self, env):
         pass
@@ -936,11 +913,9 @@ class CEnumDefItemNode(StatNode):
             if not self.value.type.is_int:
                 self.value = self.value.coerce_to(PyrexTypes.c_int_type, env)
                 self.value.analyse_const_expression(env)
-            value = self.value.result()
-        else:
-            value = self.name
         entry = env.declare_const(self.name, enum_entry.type, 
-            value, self.pos, cname = self.cname, visibility = enum_entry.visibility)
+            self.value, self.pos, cname = self.cname,
+            visibility = enum_entry.visibility)
         enum_entry.enum_values.append(entry)
 
 
@@ -986,26 +961,14 @@ class FuncDefNode(StatNode, BlockNode):
         for arg in self.args:
             if arg.default:
                 if arg.is_generic:
-                    if not hasattr(arg, 'default_entry'):
-                        arg.default.analyse_types(env)
-                        arg.default = arg.default.coerce_to(arg.type, genv)
-                        if arg.default.is_literal:
-                            arg.default_entry = arg.default
-                            arg.default_result_code = arg.default.calculate_result_code()
-                            if arg.default.type != arg.type and not arg.type.is_int:
-                                arg.default_result_code = arg.type.cast_code(arg.default_result_code)
-                        else:
-                            arg.default.allocate_temps(genv)
-                            arg.default_entry = genv.add_default_value(arg.type)
-                            if arg.type.is_pyobject:
-                                arg.default_entry.init = 0
-                            arg.default_entry.used = 1
-                            arg.default_result_code = arg.default_entry.cname
+                    arg.default.analyse_types(env)
+                    arg.default = arg.default.coerce_to(arg.type, genv)
+                    arg.default.allocate_temps(genv)
                 else:
                     error(arg.pos,
                         "This argument cannot have a default value")
                     arg.default = None
-    
+
     def need_gil_acquisition(self, lenv):
         return 0
         
@@ -1038,13 +1001,7 @@ class FuncDefNode(StatNode, BlockNode):
             
         # ----- Top-level constants used by this function
         code.mark_pos(self.pos)
-        self.generate_interned_num_decls(lenv, code)
-        self.generate_interned_string_decls(lenv, code)
-        self.generate_py_string_decls(lenv, code)
         self.generate_cached_builtins_decls(lenv, code)
-        #code.putln("")
-        #code.put_var_declarations(lenv.const_entries, static = 1)
-        self.generate_const_definitions(lenv, code)
         # ----- Function header
         code.putln("")
         if self.py_func:
@@ -1240,14 +1197,15 @@ class FuncDefNode(StatNode, BlockNode):
                 if not default.is_literal:
                     default.generate_evaluation_code(code)
                     default.make_owned_reference(code)
+                    result = default.result_as(arg.type)
                     code.putln(
                         "%s = %s;" % (
-                            arg.default_entry.cname,
-                            default.result_as(arg.default_entry.type)))
-                    if default.is_temp and default.type.is_pyobject:
-                        code.putln("%s = 0;" % default.result())
+                            arg.calculate_default_value_code(code),
+                            result))
+                    if arg.type.is_pyobject:
+                        code.put_giveref(default.result())
+                    default.generate_post_assignment_code(code)
                     default.free_temps(code)
-                    code.put_var_giveref(arg.default_entry)
         # For Python class methods, create and store function object
         if self.assmt:
             self.assmt.generate_execution_code(code)
@@ -1358,8 +1316,6 @@ class CFuncDefNode(FuncDefNode):
             self.entry.as_variable = self.py_func.entry
             # Reset scope entry the above cfunction
             env.entries[name] = self.entry
-            self.py_func.interned_attr_cname = env.intern_identifier(
-                self.py_func.entry.name)
             if not env.is_module_scope or Options.lookup_module_cpdef:
                 self.override = OverrideCheckNode(self.pos, py_func = self.py_func)
                 self.body = StatListNode(self.pos, stats=[self.override, self.body])
@@ -1384,24 +1340,28 @@ class CFuncDefNode(FuncDefNode):
             if not arg.name:
                 error(arg.pos, "Missing argument name")
             self.declare_argument(env, arg)
-            
+
     def need_gil_acquisition(self, lenv):
+        return self.type.with_gil
+
+    def gil_check(self, env):
         type = self.type
-        with_gil = self.type.with_gil
+        with_gil = type.with_gil
         if type.nogil and not with_gil:
             if type.return_type.is_pyobject:
                 error(self.pos,
                       "Function with Python return type cannot be declared nogil")
-            for entry in lenv.var_entries + lenv.temp_entries:
+            for entry in env.var_entries + env.temp_entries:
                 if entry.type.is_pyobject:
                     error(self.pos, "Function declared nogil has Python locals or temporaries")
-        return with_gil
 
     def analyse_expressions(self, env):
         self.local_scope.directives = env.directives
-        self.analyse_default_values(env)
         if self.py_func is not None:
+            # this will also analyse the default values
             self.py_func.analyse_expressions(env)
+        else:
+            self.analyse_default_values(env)
 
     def generate_function_header(self, code, with_pymethdef, with_opt_args = 1, with_dispatch = 1, cname = None):
         arg_decls = []
@@ -1440,7 +1400,9 @@ class CFuncDefNode(FuncDefNode):
     def generate_argument_declarations(self, env, code):
         for arg in self.args:
             if arg.default:
-                    code.putln('%s = %s;' % (arg.type.declaration_code(arg.cname), arg.default_result_code))
+                result = arg.calculate_default_value_code(code)
+                code.putln('%s = %s;' % (
+                    arg.type.declaration_code(arg.cname), result))
 
     def generate_keyword_list(self, code):
         pass
@@ -1802,10 +1764,6 @@ class DefNode(FuncDefNode):
                 arg.entry = self.declare_argument(env, arg)
             arg.entry.used = 1
             arg.entry.is_self_arg = arg.is_self_arg
-            if not arg.is_self_arg:
-                arg.name_entry = env.get_string_const(
-                    arg.name, identifier = True)
-                env.add_py_string(arg.name_entry, identifier = True)
             if arg.hdr_type:
                 if arg.is_self_arg or \
                     (arg.type.is_extension_type and not arg.hdr_type.is_extension_type):
@@ -1829,13 +1787,12 @@ class DefNode(FuncDefNode):
         self.analyse_default_values(env)
         if env.is_py_class_scope:
             self.synthesize_assignment_node(env)
-    
+
     def synthesize_assignment_node(self, env):
         import ExprNodes
         self.assmt = SingleAssignmentNode(self.pos,
             lhs = ExprNodes.NameNode(self.pos, name = self.name),
             rhs = ExprNodes.UnboundMethodNode(self.pos, 
-                class_cname = env.class_obj_cname,
                 function = ExprNodes.PyCFunctionNode(self.pos,
                     pymethdef_cname = self.entry.pymethdef_cname)))
         self.assmt.analyse_declarations(env)
@@ -1888,7 +1845,7 @@ class DefNode(FuncDefNode):
                     code.putln("PyObject *%s = 0;" % arg.hdr_cname)
                 else:
                     code.put_var_declaration(arg.entry)
-    
+
     def generate_keyword_list(self, code):
         if self.signature_has_generic_args() and \
                 self.signature_has_nongeneric_args():
@@ -1897,7 +1854,8 @@ class DefNode(FuncDefNode):
                     Naming.pykwdlist_cname)
             for arg in self.args:
                 if arg.is_generic:
-                    code.put('&%s,' % arg.name_entry.pystring_cname)
+                    pystring_cname = code.intern_identifier(arg.name)
+                    code.put('&%s,' % pystring_cname)
             code.putln("0};")
 
     def generate_argument_parsing_code(self, env, code):
@@ -2083,10 +2041,11 @@ class DefNode(FuncDefNode):
             code.putln('} else {')
             for i, arg in enumerate(kw_only_args):
                 if not arg.default:
+                    pystring_cname = code.intern_identifier(arg.name)
                     # required keyword-only argument missing
                     code.put('__Pyx_RaiseKeywordRequired("%s", %s); ' % (
                             self.name.utf8encode(),
-                            arg.name_entry.pystring_cname))
+                            pystring_cname))
                     code.putln(code.error_goto(self.pos))
                     break
 
@@ -2146,7 +2105,7 @@ class DefNode(FuncDefNode):
                 code.putln(
                     "%s = %s;" % (
                         arg.entry.cname,
-                        arg.default_result_code))
+                        arg.calculate_default_value_code(code)))
 
     def generate_stararg_init_code(self, max_positional_args, code):
         if self.starstar_arg:
@@ -2188,7 +2147,7 @@ class DefNode(FuncDefNode):
         default_args = []
         for i, arg in enumerate(all_args):
             if arg.default and arg.type.is_pyobject:
-                default_value = arg.default_result_code
+                default_value = arg.calculate_default_value_code(code)
                 if arg.type is not PyrexTypes.py_object_type:
                     default_value = "(PyObject*)"+default_value
                 default_args.append((i, default_value))
@@ -2234,19 +2193,20 @@ class DefNode(FuncDefNode):
                         code.putln('default:')
                     else:
                         code.putln('case %2d:' % i)
+                pystring_cname = code.intern_identifier(arg.name)
                 if arg.default:
                     if arg.kw_only:
                         # handled separately below
                         continue
                     code.putln('if (kw_args > %d) {' % num_required_args)
                     code.putln('PyObject* value = PyDict_GetItem(%s, %s);' % (
-                        Naming.kwds_cname, arg.name_entry.pystring_cname))
+                        Naming.kwds_cname, pystring_cname))
                     code.putln('if (unlikely(value)) { values[%d] = value; kw_args--; }' % i)
                     code.putln('}')
                 else:
                     num_required_args -= 1
                     code.putln('values[%d] = PyDict_GetItem(%s, %s);' % (
-                        i, Naming.kwds_cname, arg.name_entry.pystring_cname))
+                        i, Naming.kwds_cname, pystring_cname))
                     code.putln('if (likely(values[%d])) kw_args--;' % i);
                     if i < min_positional_args:
                         if i == 0:
@@ -2266,7 +2226,7 @@ class DefNode(FuncDefNode):
                     elif arg.kw_only:
                         code.putln('else {')
                         code.put('__Pyx_RaiseKeywordRequired("%s", %s); ' %(
-                                self.name.utf8encode(), arg.name_entry.pystring_cname))
+                                self.name.utf8encode(), pystring_cname))
                         code.putln(code.error_goto(self.pos))
                         code.putln('}')
             if max_positional_args > 0:
@@ -2286,9 +2246,10 @@ class DefNode(FuncDefNode):
                 code.putln('while (kw_args > 0) {')
                 code.putln('PyObject* value;')
                 for i, arg in optional_args:
+                    pystring_cname = code.intern_identifier(arg.name)
                     code.putln(
                         'value = PyDict_GetItem(%s, %s);' % (
-                        Naming.kwds_cname, arg.name_entry.pystring_cname))
+                        Naming.kwds_cname, pystring_cname))
                     code.putln(
                         'if (value) { values[%d] = value; if (!(--kw_args)) break; }' % i)
                 code.putln('break;')
@@ -2332,7 +2293,7 @@ class DefNode(FuncDefNode):
                 code.putln(
                     "%s = %s;" % (
                         arg.entry.cname,
-                        arg.default_result_code))
+                        arg.calculate_default_value_code(code)))
                 code.putln('}')
 
     def generate_argument_conversion_code(self, code):
@@ -2455,6 +2416,7 @@ class OverrideCheckNode(StatNode):
         self.body.analyse_expressions(env)
         
     def generate_execution_code(self, code):
+        interned_attr_cname = code.intern_identifier(self.py_func.entry.name)
         # Check to see if we are an extension type
         if self.py_func.is_module_scope:
             self_arg = "((PyObject *)%s)" % Naming.module_cname
@@ -2469,10 +2431,12 @@ class OverrideCheckNode(StatNode):
             code.putln("else if (unlikely(Py_TYPE(%s)->tp_dictoffset != 0)) {" % self_arg)
         err = code.error_goto_if_null(self.func_node.result(), self.pos)
         # need to get attribute manually--scope would return cdef method
-        code.putln("%s = PyObject_GetAttr(%s, %s); %s" % (self.func_node.result(), self_arg, self.py_func.interned_attr_cname, err))
+        code.putln("%s = PyObject_GetAttr(%s, %s); %s" % (
+            self.func_node.result(), self_arg, interned_attr_cname, err))
         code.put_gotref(self.func_node.py_result())
         is_builtin_function_or_method = 'PyCFunction_Check(%s)' % self.func_node.result()
-        is_overridden = '(PyCFunction_GET_FUNCTION(%s) != (void *)&%s)' % (self.func_node.result(), self.py_func.entry.func_cname)
+        is_overridden = '(PyCFunction_GET_FUNCTION(%s) != (void *)&%s)' % (
+            self.func_node.result(), self.py_func.entry.func_cname)
         code.putln('if (!%s || %s) {' % (is_builtin_function_or_method, is_overridden))
         self.body.generate_execution_code(code)
         code.putln('}')
@@ -2571,8 +2535,6 @@ class PyClassDefNode(ClassDefNode):
         self.classobj.analyse_expressions(env)
         genv = env.global_scope()
         cenv = self.scope
-        cenv.class_dict_cname = self.dict.result()
-        cenv.namespace_cname = cenv.class_obj_cname = self.classobj.result()
         self.body.analyse_expressions(cenv)
         self.target.analyse_target_expression(env, self.classobj)
         self.dict.release_temp(env)
@@ -2580,16 +2542,19 @@ class PyClassDefNode(ClassDefNode):
         #self.target.release_target_temp(env)
     
     def generate_function_definitions(self, env, code):
-        self.generate_py_string_decls(self.scope, code)
         self.body.generate_function_definitions(self.scope, code)
     
     def generate_execution_code(self, code):
+        code.pyclass_stack.append(self)
+        cenv = self.scope
         self.dict.generate_evaluation_code(code)
         self.classobj.generate_evaluation_code(code)
+        cenv.namespace_cname = cenv.class_obj_cname = self.classobj.result()
         self.body.generate_execution_code(code)
         self.target.generate_assignment_code(self.classobj, code)
         self.dict.generate_disposal_code(code)
         self.dict.free_temps(code)
+        code.pyclass_stack.pop()
 
 
 class CClassDefNode(ClassDefNode):
@@ -2719,7 +2684,6 @@ class CClassDefNode(ClassDefNode):
             self.body.analyse_expressions(scope)
     
     def generate_function_definitions(self, env, code):
-        self.generate_py_string_decls(self.entry.type.scope, code)
         if self.body:
             self.body.generate_function_definitions(
                 self.entry.type.scope, code)
@@ -2747,10 +2711,6 @@ class PropertyNode(StatNode):
     def analyse_declarations(self, env):
         entry = env.declare_property(self.name, self.doc, self.pos)
         if entry:
-            if self.doc and Options.docstrings:
-                doc_entry = env.get_string_const(
-                    self.doc, identifier = False)
-                entry.doc_cname = doc_entry.cname
             self.body.analyse_declarations(entry.scope)
 
     def analyse_expressions(self, env):
@@ -3242,8 +3202,8 @@ class PrintStatNode(StatNode):
         env.use_utility_code(printing_utility_code)
         if len(self.arg_tuple.args) == 1 and self.append_newline:
             env.use_utility_code(printing_one_utility_code)
-        self.gil_check(env)
 
+    gil_check = StatNode._gil_check
     gil_message = "Python print statement"
 
     def generate_execution_code(self, code):
@@ -3287,8 +3247,8 @@ class ExecStatNode(StatNode):
         self.temp_result = env.allocate_temp_pyobject()
         env.release_temp(self.temp_result)
         env.use_utility_code(Builtin.pyexec_utility_code)
-        self.gil_check(env)
 
+    gil_check = StatNode._gil_check
     gil_message = "Python exec statement"
 
     def generate_execution_code(self, code):
@@ -3326,11 +3286,14 @@ class DelStatNode(StatNode):
     def analyse_expressions(self, env):
         for arg in self.args:
             arg.analyse_target_expression(env, None)
-            if arg.type.is_pyobject:
-                self.gil_check(env)
-            else:
+            if not arg.type.is_pyobject:
                 error(arg.pos, "Deletion of non-Python object")
             #arg.release_target_temp(env)
+
+    def gil_check(self, env):
+        for arg in self.args:
+            if arg.type.is_pyobject:
+                self._gil_check(env)
 
     gil_message = "Deleting Python object"
 
@@ -3417,8 +3380,10 @@ class ReturnStatNode(StatNode):
                 and not return_type.is_pyobject
                 and not return_type.is_returncode):
                     error(self.pos, "Return value required")
-        if return_type.is_pyobject:
-            self.gil_check(env)
+
+    def gil_check(self, env):
+        if self.return_type.is_pyobject:
+            self._gil_check(env)
 
     gil_message = "Returning Python object"
 
@@ -3493,8 +3458,8 @@ class RaiseStatNode(StatNode):
             self.exc_tb.release_temp(env)
         env.use_utility_code(raise_utility_code)
         env.use_utility_code(restore_exception_utility_code)
-        self.gil_check(env)
 
+    gil_check = StatNode._gil_check
     gil_message = "Raising exception"
 
     def generate_execution_code(self, code):
@@ -3543,10 +3508,10 @@ class ReraiseStatNode(StatNode):
     child_attrs = []
 
     def analyse_expressions(self, env):
-        self.gil_check(env)
         env.use_utility_code(raise_utility_code)
         env.use_utility_code(restore_exception_utility_code)
 
+    gil_check = StatNode._gil_check
     gil_message = "Raising exception"
 
     def generate_execution_code(self, code):
@@ -3575,9 +3540,9 @@ class AssertStatNode(StatNode):
         self.cond.release_temp(env)
         if self.value:
             self.value.release_temp(env)
-        self.gil_check(env)
         #env.recycle_pending_temps() # TEMPORARY
 
+    gil_check = StatNode._gil_check
     gil_message = "Raising exception"
     
     def generate_execution_code(self, code):
@@ -3704,11 +3669,12 @@ class SwitchCaseNode(StatNode):
     # body          StatNode
     
     child_attrs = ['conditions', 'body']
-    
+
     def generate_execution_code(self, code):
         for cond in self.conditions:
             code.mark_pos(cond.pos)
-            code.putln("case %s:" % cond.calculate_result_code())
+            cond.generate_evaluation_code(code)
+            code.putln("case %s:" % cond.result())
         self.body.generate_execution_code(code)
         code.putln("break;")
         
@@ -3727,7 +3693,7 @@ class SwitchStatNode(StatNode):
     child_attrs = ['test', 'cases', 'else_clause']
     
     def generate_execution_code(self, code):
-        code.putln("switch (%s) {" % self.test.calculate_result_code())
+        code.putln("switch (%s) {" % self.test.result())
         for case in self.cases:
             case.generate_execution_code(code)
         if self.else_clause is not None:
@@ -3890,6 +3856,7 @@ class ForFromStatNode(LoopNode, StatNode):
     #
     #  Used internally:
     #
+    #  from_range         bool
     #  is_py_target       bool
     #  loopvar_node       ExprNode (usually a NameNode or temp node)
     #  py_loopvar_node    PyTempNode or None
@@ -3898,6 +3865,7 @@ class ForFromStatNode(LoopNode, StatNode):
     is_py_target = False
     loopvar_node = None
     py_loopvar_node = None
+    from_range = False
 
     def analyse_declarations(self, env):
         self.target.analyse_target_declaration(env)
@@ -3910,37 +3878,44 @@ class ForFromStatNode(LoopNode, StatNode):
         self.target.analyse_target_types(env)
         self.bound1.analyse_types(env)
         self.bound2.analyse_types(env)
-        if self.target.type.is_numeric:
-            self.bound1 = self.bound1.coerce_to(self.target.type, env)
-            self.bound2 = self.bound2.coerce_to(self.target.type, env)
-        else:
-            self.bound1 = self.bound1.coerce_to_integer(env)
-            self.bound2 = self.bound2.coerce_to_integer(env)
         if self.step is not None:
             if isinstance(self.step, ExprNodes.UnaryMinusNode):
                 warning(self.step.pos, "Probable infinite loop in for-from-by statment. Consider switching the directions of the relations.", 2)
             self.step.analyse_types(env)
-            self.step = self.step.coerce_to_integer(env)
-        if not (self.bound2.is_name or self.bound2.is_literal):
+        
+        target_type = self.target.type
+        if self.target.type.is_numeric:
+            loop_type = self.target.type
+        else:
+            loop_type = PyrexTypes.c_int_type
+            if not self.bound1.type.is_pyobject:
+                loop_type = PyrexTypes.widest_numeric_type(loop_type, self.bound1.type)
+            if not self.bound2.type.is_pyobject:
+                loop_type = PyrexTypes.widest_numeric_type(loop_type, self.bound2.type)
+            if self.step is not None and not self.step.type.is_pyobject:
+                loop_type = PyrexTypes.widest_numeric_type(loop_type, self.step.type)
+        self.bound1 = self.bound1.coerce_to(loop_type, env)
+        self.bound2 = self.bound2.coerce_to(loop_type, env)
+        if not self.bound2.is_literal:
             self.bound2 = self.bound2.coerce_to_temp(env)
+        if self.step is not None:
+            self.step = self.step.coerce_to(loop_type, env)            
+            if not self.step.is_literal:
+                self.step = self.step.coerce_to_temp(env)
+
         target_type = self.target.type
         if not (target_type.is_pyobject or target_type.is_numeric):
             error(self.target.pos,
-                "Integer for-loop variable must be of type int or Python object")
-        #if not (target_type.is_pyobject
-        #    or target_type.assignable_from(PyrexTypes.c_int_type)):
-        #        error(self.target.pos,
-        #            "Cannot assign integer to variable of type '%s'" % target_type)
+                "for-from loop variable must be c numeric type or Python object")
         if target_type.is_numeric:
-            self.is_py_target = 0
+            self.is_py_target = False
             if isinstance(self.target, ExprNodes.IndexNode) and self.target.is_buffer_access:
                 raise error(self.pos, "Buffer indexing not allowed as for loop target.")
             self.loopvar_node = self.target
             self.py_loopvar_node = None
         else:
-            self.is_py_target = 1
-            c_loopvar_node = ExprNodes.TempNode(self.pos, 
-                PyrexTypes.c_long_type, env)
+            self.is_py_target = True
+            c_loopvar_node = ExprNodes.TempNode(self.pos, loop_type, env)
             c_loopvar_node.allocate_temps(env)
             self.loopvar_node = c_loopvar_node
             self.py_loopvar_node = \
@@ -3966,49 +3941,45 @@ class ForFromStatNode(LoopNode, StatNode):
             
     def generate_execution_code(self, code):
         old_loop_labels = code.new_loop_labels()
-        from_range = getattr(self, "from_range", False)
+        from_range = self.from_range
         self.bound1.generate_evaluation_code(code)
         self.bound2.generate_evaluation_code(code)
         offset, incop = self.relation_table[self.relation1]
-        if incop == "++":
-            decop = "--"
-        else:
-            decop = "++"
         if self.step is not None:
             self.step.generate_evaluation_code(code)
             step = self.step.result()
             incop = "%s=%s" % (incop[0], step)
-            decop = "%s=%s" % (decop[0], step)
-        loopvar_name = self.loopvar_node.result()
         if from_range:
-            range_bound = code.funcstate.allocate_temp(self.bound2.type, manage_ref=False)
-            code.putln("%s = %s;" % (range_bound, self.bound2.result()))
-            # Skip the loop entirely (and avoid assigning to the loopvar) if
-            # the loop is empty:
-            code.putln("if (%s%s %s %s) {" % (
-                self.bound1.result(), offset, self.relation2, range_bound
-                ))
+            loopvar_name = code.funcstate.allocate_temp(self.target.type, False)
         else:
-            range_bound = self.bound2.result()
+            loopvar_name = self.loopvar_node.result()
         code.putln(
             "for (%s = %s%s; %s %s %s; %s%s) {" % (
                 loopvar_name,
                 self.bound1.result(), offset,
-                loopvar_name, self.relation2, range_bound,
+                loopvar_name, self.relation2, self.bound2.result(),
                 loopvar_name, incop))
         if self.py_loopvar_node:
             self.py_loopvar_node.generate_evaluation_code(code)
             self.target.generate_assignment_code(self.py_loopvar_node, code)
+        elif from_range:
+            code.putln("%s = %s;" % (
+                            self.target.result(), loopvar_name))
         self.body.generate_execution_code(code)
         code.put_label(code.continue_label)
-        if from_range:
-            # Undo last increment to maintain Python semantics:
-            code.putln("} %s%s;" % (loopvar_name, decop))
-            # End the outer if statement:
-            code.putln("} /* end if */")
-            code.funcstate.release_temp(range_bound)
-        else:
-            code.putln("}")
+        if self.py_loopvar_node:
+            # Reassign py variable to loop var here.
+            # (For consistancy, should rarely come up in practice.)
+            import ExprNodes
+            from_py_node = ExprNodes.CoerceFromPyTypeNode(self.loopvar_node.type, self.target, None)
+            from_py_node.temp_code = loopvar_name
+            from_py_node.generate_result_code(code)
+        code.putln("}")
+        if self.py_loopvar_node:
+            # This is potentially wasteful, but we don't want the semantics to 
+            # depend on whether or not the loop is a python type. 
+            self.py_loopvar_node.generate_evaluation_code(code)
+            self.target.generate_assignment_code(self.py_loopvar_node, code)
         break_label = code.break_label
         code.set_loop_labels(old_loop_labels)
         if self.else_clause:
@@ -4023,6 +3994,8 @@ class ForFromStatNode(LoopNode, StatNode):
         if self.step is not None:
             self.step.generate_disposal_code(code)
             self.step.free_temps(code)
+        if from_range:
+            code.funcstate.release_temp(loopvar_name)
     
     relation_table = {
         # {relop : (initial offset, increment op)}
@@ -4089,9 +4062,8 @@ class TryExceptStatNode(StatNode):
             except_clause.analyse_declarations(env)
         if self.else_clause:
             self.else_clause.analyse_declarations(env)
-        self.gil_check(env)
         env.use_utility_code(reset_exception_utility_code)
-    
+
     def analyse_expressions(self, env):
         self.body.analyse_expressions(env)
         self.cleanup_list = env.free_temp_entries[:]
@@ -4105,8 +4077,8 @@ class TryExceptStatNode(StatNode):
         self.has_default_clause = default_clause_seen
         if self.else_clause:
             self.else_clause.analyse_expressions(env)
-        self.gil_check(env)
 
+    gil_check = StatNode._gil_check
     gil_message = "Try-except statement"
 
     def generate_execution_code(self, code):
@@ -4416,8 +4388,8 @@ class TryFinallyStatNode(StatNode):
         self.body.analyse_expressions(env)
         self.cleanup_list = env.free_temp_entries[:]
         self.finally_clause.analyse_expressions(env)
-        self.gil_check(env)
 
+    gil_check = StatNode._gil_check
     gil_message = "Try-finally statement"
 
     def generate_execution_code(self, code):
@@ -4564,8 +4536,8 @@ class GILStatNode(TryFinallyStatNode):
     #  'with gil' or 'with nogil' statement
     #
     #   state   string   'gil' or 'nogil'
-        
-    child_attrs = []
+
+#    child_attrs = []
     
     preserve_exception = 0
 
@@ -4754,7 +4726,7 @@ class FromImportStatNode(StatNode):
                 else:
                     coerced_item = self.item.coerce_to(target.type, env)
                 self.interned_items.append(
-                    (env.intern_identifier(name), target, coerced_item))
+                    (name, target, coerced_item))
                 #target.release_target_temp(env) # was release_temp ?!?
         self.module.release_temp(env)
         self.item.release_temp(env)
@@ -4767,7 +4739,8 @@ class FromImportStatNode(StatNode):
                     Naming.import_star,
                     self.module.py_result(),
                     code.error_goto(self.pos)))
-        for cname, target, coerced_item in self.interned_items:
+        for name, target, coerced_item in self.interned_items:
+            cname = code.intern_identifier(name)
             code.putln(
                 '%s = PyObject_GetAttr(%s, %s); %s' % (
                     self.item.result(), 
