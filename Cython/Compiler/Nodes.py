@@ -11,7 +11,7 @@ import Naming
 import PyrexTypes
 import TypeSlots
 from PyrexTypes import py_object_type, error_type, CTypedefType, CFuncType
-from Symtab import ModuleScope, LocalScope, GeneratorLocalScope, \
+from Symtab import ModuleScope, LocalScope, ClosureScope, \
     StructOrUnionScope, PyClassScope, CClassScope
 from Cython.Utils import open_new_file, replace_suffix, UtilityCode
 from StringEncoding import EncodedString, escape_byte_string, split_docstring
@@ -980,7 +980,7 @@ class FuncDefNode(StatNode, BlockNode):
         while env.is_py_class_scope or env.is_c_class_scope:
             env = env.outer_scope
         if self.needs_closure:
-            lenv = GeneratorLocalScope(name = self.entry.name, outer_scope = genv)
+            lenv = ClosureScope(name = self.entry.name, scope_name = self.entry.cname, outer_scope = genv)
         else:
             lenv = LocalScope(name = self.entry.name, outer_scope = genv)
         lenv.return_type = self.return_type
@@ -995,6 +995,17 @@ class FuncDefNode(StatNode, BlockNode):
         import Buffer
 
         lenv = self.local_scope
+        if lenv.is_closure_scope:
+            outer_scope_cname = "%s->%s" % (Naming.cur_scope_cname,
+                                            Naming.outer_scope_cname)
+        else:
+            outer_scope_cname = Naming.outer_scope_cname
+        lenv.mangle_closure_cnames(outer_scope_cname)
+        # Generate closure function definitions
+        self.body.generate_function_definitions(lenv, code)
+        # generate lambda function definitions
+        for node in lenv.lambda_defs:
+            node.generate_function_definitions(lenv, code)
 
         is_getbuffer_slot = (self.entry.name == "__getbuffer__" and
                              self.entry.scope.is_c_class_scope)
@@ -1008,18 +1019,24 @@ class FuncDefNode(StatNode, BlockNode):
         self.generate_cached_builtins_decls(lenv, code)
         # ----- Function header
         code.putln("")
+        with_pymethdef = env.is_py_class_scope or env.is_closure_scope
         if self.py_func:
             self.py_func.generate_function_header(code, 
-                with_pymethdef = env.is_py_class_scope,
+                with_pymethdef = with_pymethdef,
                 proto_only=True)
         self.generate_function_header(code,
-            with_pymethdef = env.is_py_class_scope)
+            with_pymethdef = with_pymethdef)
         # ----- Local variable declarations
-        lenv.mangle_closure_cnames(Naming.cur_scope_cname)
+        if lenv.is_closure_scope:
+            code.put(lenv.scope_class.type.declaration_code(Naming.cur_scope_cname))
+            code.putln(";")
+        if env.is_closure_scope and not lenv.is_closure_scope:
+            code.put(env.scope_class.type.declaration_code(Naming.outer_scope_cname))
+            code.putln(";")
         self.generate_argument_declarations(lenv, code)
-        if self.needs_closure:
-            code.putln("/* TODO: declare and create scope object */")
-        code.put_var_declarations(lenv.var_entries)
+        for entry in lenv.var_entries:
+            if not entry.in_closure:
+                code.put_var_declaration(entry)
         init = ""
         if not self.return_type.is_void:
             if self.return_type.is_pyobject:
@@ -1043,6 +1060,26 @@ class FuncDefNode(StatNode, BlockNode):
             code.put_setup_refcount_context(self.entry.name)
         if is_getbuffer_slot:
             self.getbuffer_init(code)
+        # ----- Create closure scope object
+        if self.needs_closure:
+            code.putln("%s = (%s)%s->tp_new(%s, %s, NULL);" % (
+                            Naming.cur_scope_cname,
+                            lenv.scope_class.type.declaration_code(''),
+                            lenv.scope_class.type.typeptr_cname, 
+                            lenv.scope_class.type.typeptr_cname,
+                            Naming.empty_tuple))
+            # TODO: error handling
+            code.put_gotref(Naming.cur_scope_cname)
+            # Note that it is unsafe to decref the scope at this point.
+        if env.is_closure_scope:
+            code.putln("%s = (%s)%s;" % (
+                            outer_scope_cname,
+                            env.scope_class.type.declaration_code(''),
+                            Naming.self_cname))
+            if self.needs_closure:
+                # inner closures own a reference to their outer parent
+                code.put_incref(outer_scope_cname, env.scope_class.type)
+                code.put_giveref(outer_scope_cname)
         # ----- Fetch arguments
         self.generate_argument_parsing_code(env, code)
         # If an argument is assigned to in the body, we must 
@@ -1144,13 +1181,19 @@ class FuncDefNode(StatNode, BlockNode):
             for entry in lenv.var_entries:
                 if lenv.control_flow.get_state((entry.name, 'initalized')) is not True:
                     entry.xdecref_cleanup = 1
-        code.put_var_decrefs(lenv.var_entries, used_only = 1)
+
+        if self.needs_closure:
+            code.put_decref(Naming.cur_scope_cname, lenv.scope_class.type)
+        for entry in lenv.var_entries:
+            if entry.used and not entry.in_closure:
+                code.put_var_decref(entry)
         # Decref any increfed args
         for entry in lenv.arg_entries:
-            if entry.type.is_pyobject and lenv.control_flow.get_state((entry.name, 'source')) != 'arg':
+            if (entry.type.is_pyobject 
+                    and not entry.in_closure
+                    and lenv.control_flow.get_state((entry.name, 'source')) != 'arg'):
                 code.put_var_decref(entry)
 
-        # code.putln("/* TODO: decref scope object */")
         # ----- Return
         # This code is duplicated in ModuleNode.generate_module_init_func
         if not lenv.nogil:
@@ -1512,6 +1555,7 @@ class DefNode(FuncDefNode):
     # A Python function definition.
     #
     # name          string                 the Python name of the function
+    # lambda_name   string                 the internal name of a lambda 'function'
     # decorators    [DecoratorNode]        list of decorators
     # args          [CArgDeclNode]         formal arguments
     # star_arg      PyArgDeclNode or None  * argument
@@ -1526,6 +1570,7 @@ class DefNode(FuncDefNode):
     
     child_attrs = ["args", "star_arg", "starstar_arg", "body", "decorators"]
 
+    lambda_name = None
     assmt = None
     num_kwonly_args = 0
     num_required_kw_args = 0
@@ -1641,7 +1686,10 @@ class DefNode(FuncDefNode):
             if arg.not_none and not arg.type.is_extension_type:
                 error(self.pos,
                     "Only extension type arguments can have 'not None'")
-        self.declare_pyfunction(env)
+        if self.name == '<lambda>':
+            self.declare_lambda_function(env)
+        else:
+            self.declare_pyfunction(env)
         self.analyse_signature(env)
         self.return_type = self.entry.signature.return_type()
 
@@ -1726,10 +1774,10 @@ class DefNode(FuncDefNode):
     def declare_pyfunction(self, env):
         #print "DefNode.declare_pyfunction:", self.name, "in", env ###
         name = self.name
-        entry = env.lookup_here(self.name)
+        entry = env.lookup_here(name)
         if entry and entry.type.is_cfunction and not self.is_wrapper:
             warning(self.pos, "Overriding cdef method with def method.", 5)
-        entry = env.declare_pyfunction(self.name, self.pos)
+        entry = env.declare_pyfunction(name, self.pos)
         self.entry = entry
         prefix = env.scope_prefix
         entry.func_cname = \
@@ -1742,6 +1790,18 @@ class DefNode(FuncDefNode):
                 Naming.funcdoc_prefix + prefix + name
         else:
             entry.doc = None
+
+    def declare_lambda_function(self, env):
+        name = self.name
+        prefix = env.scope_prefix
+        func_cname = \
+            Naming.lambda_func_prefix + u'funcdef' + prefix + self.lambda_name
+        entry = env.declare_lambda_function(func_cname, self.pos)
+        entry.pymethdef_cname = \
+            Naming.lambda_func_prefix + u'methdef' + prefix + self.lambda_name
+        entry.qualified_name = env.qualify_name(self.lambda_name)
+        entry.doc = None
+        self.entry = entry
 
     def declare_arguments(self, env):
         for arg in self.args:
@@ -1779,16 +1839,22 @@ class DefNode(FuncDefNode):
     def analyse_expressions(self, env):
         self.local_scope.directives = env.directives
         self.analyse_default_values(env)
-        if env.is_py_class_scope:
+        if env.is_py_class_scope or env.is_closure_scope:
+            # Shouldn't we be doing this at the module level too?
             self.synthesize_assignment_node(env)
 
     def synthesize_assignment_node(self, env):
         import ExprNodes
-        self.assmt = SingleAssignmentNode(self.pos,
-            lhs = ExprNodes.NameNode(self.pos, name = self.name),
+        if env.is_py_class_scope:
             rhs = ExprNodes.UnboundMethodNode(self.pos, 
                 function = ExprNodes.PyCFunctionNode(self.pos,
-                    pymethdef_cname = self.entry.pymethdef_cname)))
+                    pymethdef_cname = self.entry.pymethdef_cname))
+        elif env.is_closure_scope:
+            rhs = ExprNodes.InnerFunctionNode(
+                self.pos, pymethdef_cname = self.entry.pymethdef_cname)
+        self.assmt = SingleAssignmentNode(self.pos,
+            lhs = ExprNodes.NameNode(self.pos, name = self.name),
+            rhs = rhs)
         self.assmt.analyse_declarations(env)
         self.assmt.analyse_expressions(env)
             
@@ -1837,7 +1903,7 @@ class DefNode(FuncDefNode):
             if arg.is_generic: # or arg.needs_conversion:
                 if arg.needs_conversion:
                     code.putln("PyObject *%s = 0;" % arg.hdr_cname)
-                else:
+                elif not arg.entry.in_closure:
                     code.put_var_declaration(arg.entry)
 
     def generate_keyword_list(self, code):
@@ -2291,11 +2357,14 @@ class DefNode(FuncDefNode):
                 code.putln('}')
 
     def generate_argument_conversion_code(self, code):
-        # Generate code to convert arguments from
-        # signature type to declared type, if needed.
+        # Generate code to convert arguments from signature type to
+        # declared type, if needed.  Also copies signature arguments
+        # into closure fields.
         for arg in self.args:
             if arg.needs_conversion:
                 self.generate_arg_conversion(arg, code)
+            elif arg.entry.in_closure:
+                code.putln('%s = %s;' % (arg.entry.cname, arg.hdr_cname))
 
     def generate_arg_conversion(self, arg, code):
         # Generate conversion code for one argument.
