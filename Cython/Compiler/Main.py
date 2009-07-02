@@ -24,6 +24,7 @@ from Symtab import BuiltinScope, ModuleScope
 from Cython import Utils
 from Cython.Utils import open_new_file, replace_suffix
 import CythonScope
+import DebugFlags
 
 module_name_pattern = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
@@ -59,14 +60,14 @@ class Context(object):
     #  include_directories   [string]
     #  future_directives     [object]
     
-    def __init__(self, include_directories, pragma_overrides):
+    def __init__(self, include_directories, compiler_directives):
         #self.modules = {"__builtin__" : BuiltinScope()}
         import Builtin, CythonScope
         self.modules = {"__builtin__" : Builtin.builtin_scope}
         self.modules["cython"] = CythonScope.create_cython_scope(self)
         self.include_directories = include_directories
         self.future_directives = set()
-        self.pragma_overrides = pragma_overrides
+        self.compiler_directives = compiler_directives
 
         self.pxds = {} # full name -> node tree
 
@@ -80,10 +81,10 @@ class Context(object):
         from ParseTreeTransforms import AnalyseDeclarationsTransform, AnalyseExpressionsTransform
         from ParseTreeTransforms import CreateClosureClasses, MarkClosureVisitor, DecoratorTransform
         from ParseTreeTransforms import InterpretCompilerDirectives, TransformBuiltinMethods
-        from ParseTreeTransforms import AlignFunctionDefinitions
+        from ParseTreeTransforms import AlignFunctionDefinitions, GilCheck
         from AutoDocTransforms import EmbedSignature
         from Optimize import FlattenInListTransform, SwitchTransform, IterationTransform
-        from Optimize import FlattenBuiltinTypeCreation, ConstantFolding, FinalOptimizePhase
+        from Optimize import OptimizeBuiltinCalls, ConstantFolding, FinalOptimizePhase
         from Buffer import IntroduceBufferAuxiliaryVars
         from ModuleNode import check_c_declarations
 
@@ -112,8 +113,9 @@ class Context(object):
             NormalizeTree(self),
             PostParse(self),
             _specific_post_parse,
-            InterpretCompilerDirectives(self, self.pragma_overrides),
+            InterpretCompilerDirectives(self, self.compiler_directives),
             _align_function_definitions,
+            ConstantFolding(),
             FlattenInListTransform(),
             WithTransform(self),
             DecoratorTransform(self),
@@ -123,11 +125,12 @@ class Context(object):
             IntroduceBufferAuxiliaryVars(self),
             _check_c_declarations,
             AnalyseExpressionsTransform(self),
-            FlattenBuiltinTypeCreation(),
+            OptimizeBuiltinCalls(),
             ConstantFolding(),
             IterationTransform(),
             SwitchTransform(),
             FinalOptimizePhase(self),
+            GilCheck(),
 #            ClearResultCodes(self),
 #            SpecialFunctions(self),
             #        CreateClosureClasses(context),
@@ -194,6 +197,8 @@ class Context(object):
         try:
             for phase in pipeline:
                 if phase is not None:
+                    if DebugFlags.debug_verbose_pipeline:
+                        print "Entering pipeline phase %r" % phase
                     data = phase(data)
         except CompileError, err:
             # err is set
@@ -521,7 +526,7 @@ def create_default_resultobj(compilation_source, options):
 
 def run_pipeline(source, options, full_module_name = None):
     # Set up context
-    context = Context(options.include_path, options.pragma_overrides)
+    context = Context(options.include_path, options.compiler_directives)
 
     # Set up source object
     cwd = os.getcwd()
@@ -574,7 +579,7 @@ class CompilationOptions(object):
                                 defaults to true when recursive is true.
     verbose           boolean   Always print source names being compiled
     quiet             boolean   Don't print source names in recursive mode
-    pragma_overrides  dict      Overrides for pragma options (see Options.py)
+    compiler_directives  dict      Overrides for pragma options (see Options.py)
     
     Following options are experimental and only used on MacOSX:
     
@@ -762,7 +767,7 @@ default_options = dict(
     timestamps = None,
     verbose = 0,
     quiet = 0,
-    pragma_overrides = {},
+    compiler_directives = {},
     emit_linenums = False,
 )
 if sys.platform == "mac":

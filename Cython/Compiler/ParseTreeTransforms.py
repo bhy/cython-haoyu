@@ -5,7 +5,7 @@ from Cython.Compiler.ExprNodes import *
 from Cython.Compiler.UtilNodes import *
 from Cython.Compiler.TreeFragment import TreeFragment, TemplateTransform
 from Cython.Compiler.StringEncoding import EncodedString
-from Cython.Compiler.Errors import CompileError
+from Cython.Compiler.Errors import error, CompileError
 try:
     set
 except NameError:
@@ -597,22 +597,48 @@ class WithTransform(CythonTransform, SkipDeclarations):
 class DecoratorTransform(CythonTransform, SkipDeclarations):
 
     def visit_DefNode(self, func_node):
+        self.visitchildren(func_node)
         if not func_node.decorators:
             return func_node
+        return self._handle_decorators(
+            func_node, func_node.name)
 
-        decorator_result = NameNode(func_node.pos, name = func_node.name)
-        for decorator in func_node.decorators[::-1]:
+    def _visit_CClassDefNode(self, class_node):
+        # This doesn't currently work, so it's disabled (also in the
+        # parser).
+        #
+        # Problem: assignments to cdef class names do not work.  They
+        # would require an additional check anyway, as the extension
+        # type must not change its C type, so decorators cannot
+        # replace an extension type, just alter it and return it.
+
+        self.visitchildren(class_node)
+        if not class_node.decorators:
+            return class_node
+        return self._handle_decorators(
+            class_node, class_node.class_name)
+
+    def visit_ClassDefNode(self, class_node):
+        self.visitchildren(class_node)
+        if not class_node.decorators:
+            return class_node
+        return self._handle_decorators(
+            class_node, class_node.name)
+
+    def _handle_decorators(self, node, name):
+        decorator_result = NameNode(node.pos, name = name)
+        for decorator in node.decorators[::-1]:
             decorator_result = SimpleCallNode(
                 decorator.pos,
                 function = decorator.decorator,
                 args = [decorator_result])
 
-        func_name_node = NameNode(func_node.pos, name = func_node.name)
+        name_node = NameNode(node.pos, name = name)
         reassignment = SingleAssignmentNode(
-            func_node.pos,
-            lhs = func_name_node,
+            node.pos,
+            lhs = name_node,
             rhs = decorator_result)
-        return [func_node, reassignment]
+        return [node, reassignment]
 
 
 class AnalyseDeclarationsTransform(CythonTransform):
@@ -830,7 +856,45 @@ class CreateClosureClasses(CythonTransform):
     def visit_FuncDefNode(self, node):
         self.create_class_from_scope(node, self.module_scope)
         return node
-        
+
+
+class GilCheck(VisitorTransform):
+    """
+    Call `node.gil_check(env)` on each node to make sure we hold the
+    GIL when we need it.  Raise an error when on Python operations
+    inside a `nogil` environment.
+    """
+    def __call__(self, root):
+        self.env_stack = [root.scope]
+        self.nogil = False
+        return super(GilCheck, self).__call__(root)
+
+    def visit_FuncDefNode(self, node):
+        self.env_stack.append(node.local_scope)
+        was_nogil = self.nogil
+        self.nogil = node.local_scope.nogil
+        if self.nogil and node.nogil_check:
+            node.nogil_check(node.local_scope)
+        self.visitchildren(node)
+        self.env_stack.pop()
+        self.nogil = was_nogil
+        return node
+
+    def visit_GILStatNode(self, node):
+        env = self.env_stack[-1]
+        if self.nogil and node.nogil_check: node.nogil_check()
+        was_nogil = self.nogil
+        self.nogil = (node.state == 'nogil')
+        self.visitchildren(node)
+        self.nogil = was_nogil
+        return node
+
+    def visit_Node(self, node):
+        if self.env_stack and self.nogil and node.nogil_check:
+            node.nogil_check(self.env_stack[-1])
+        self.visitchildren(node)
+        return node
+
 
 class EnvTransform(CythonTransform):
     """
