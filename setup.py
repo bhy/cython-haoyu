@@ -2,13 +2,24 @@ from distutils.core import setup, Extension
 from distutils.sysconfig import get_python_lib
 import os, os.path
 import sys
-from Cython.Compiler.Version import version
 
 compiler_dir = os.path.join(get_python_lib(prefix=''), 'Cython/Compiler')
 if sys.platform == "win32":
     compiler_dir = compiler_dir[len(sys.prefix)+1:]
 
 setup_args = {}
+
+if sys.version_info[0] >= 3:
+    import lib2to3.refactor
+    from distutils.command.build_py \
+         import build_py_2to3 as build_py
+    # need to convert sources to Py3 on installation
+    fixers = [ fix for fix in lib2to3.refactor.get_fixers_from_package("lib2to3.fixes")
+               if fix.split('fix_')[-1] not in ('next',)
+               ]
+    build_py.fixer_names = fixers
+    setup_args['cmdclass'] = {"build_py" : build_py}
+
 
 if sys.version_info < (2,4):
     import glob
@@ -35,6 +46,8 @@ else:
     scripts = ["cython.py"]
 
 try:
+    if sys.version_info[0] >= 3:
+        raise ValueError
     sys.argv.remove("--no-cython-compile")
 except ValueError:
     try:
@@ -46,6 +59,7 @@ except ValueError:
                 except StandardError:
                     print("Compilation of '%s' failed" % ext.sources[0])
         from Cython.Compiler.Main import compile
+        from Cython import Utils
         source_root = os.path.dirname(__file__)
         compiled_modules = ["Cython.Plex.Scanners",
                             "Cython.Compiler.Scanning",
@@ -56,14 +70,19 @@ except ValueError:
         for module in compiled_modules:
             source_file = os.path.join(source_root, *module.split('.'))
             if os.path.exists(source_file + ".py"):
-                source_file = source_file + ".py"
+                pyx_source_file = source_file + ".py"
             else:
-                source_file = source_file + ".pyx"
-            print("Compiling module %s ..." % module)
-            result = compile(source_file)
-            if result.c_file:
+                pyx_source_file = source_file + ".pyx"
+            c_source_file = source_file + ".c"
+            if not os.path.exists(c_source_file) or \
+               Utils.file_newer_than(pyx_source_file,
+                                     Utils.modification_time(c_source_file)):
+                print("Compiling module %s ..." % module)
+                result = compile(pyx_source_file)
+                c_source_file = result.c_file
+            if c_source_file:
                 extensions.append(
-                    Extension(module, sources = [result.c_file])
+                    Extension(module, sources = [c_source_file])
                     )
             else:
                 print("Compilation failed")
@@ -74,6 +93,8 @@ except ValueError:
         print("ERROR: %s" % sys.exc_info()[1])
         print("Extension module compilation failed, using plain Python implementation")
 
+
+from Cython.Compiler.Version import version
 
 setup(
   name = 'Cython',
@@ -105,6 +126,8 @@ setup(
     "License :: OSI Approved :: Apache Software License",
     "Operating System :: OS Independent",
     "Programming Language :: Python",
+    "Programming Language :: Python :: 2",
+    "Programming Language :: Python :: 3",
     "Programming Language :: C",
     "Programming Language :: Cython",
     "Topic :: Software Development :: Code Generators",

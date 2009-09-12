@@ -8,6 +8,7 @@ Traceback (most recent call last):
 ...
 TypeError: list indices must be integers...
 '''
+
 def no_cdef():
     lst = list(range(11))
     ob = 10L
