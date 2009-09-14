@@ -10,12 +10,11 @@ cython.declare(Nodes=object, ExprNodes=object, EncodedString=object)
 import os
 import re
 import sys
-from types import ListType, TupleType
 from Cython.Compiler.Scanning import PyrexScanner, FileSourceDescriptor
 import Nodes
 import ExprNodes
 import StringEncoding
-from StringEncoding import EncodedString, BytesLiteral
+from StringEncoding import EncodedString, BytesLiteral, _str, _bytes
 from ModuleNode import ModuleNode
 from Errors import error, warning, InternalError
 from Cython import Utils
@@ -66,14 +65,23 @@ def p_ident_list(s):
 #
 #------------------------------------------
 
+def p_binop_operator(s):
+    pos = s.position()
+    op = s.sy
+    s.next()
+    return op, pos
+
 def p_binop_expr(s, ops, p_sub_expr):
     n1 = p_sub_expr(s)
     while s.sy in ops:
-        op = s.sy
-        pos = s.position()
-        s.next()
+        op, pos = p_binop_operator(s)
         n2 = p_sub_expr(s)
         n1 = ExprNodes.binop_node(pos, op, n1, n2)
+        if op == '/':
+            if Future.division in s.context.future_directives:
+                n1.truedivision = True
+            else:
+                n1.truedivision = None # unknown
     return n1
 
 #expression: or_test [if or_test else test] | lambda_form
@@ -130,21 +138,33 @@ def p_not_test(s):
 #comp_op: '<'|'>'|'=='|'>='|'<='|'<>'|'!='|'in'|'not' 'in'|'is'|'is' 'not'
 
 def p_comparison(s):
-    n1 = p_bit_expr(s)
+    n1 = p_starred_expr(s)
     if s.sy in comparison_ops:
         pos = s.position()
         op = p_cmp_op(s)
-        n2 = p_bit_expr(s)
+        n2 = p_starred_expr(s)
         n1 = ExprNodes.PrimaryCmpNode(pos, 
             operator = op, operand1 = n1, operand2 = n2)
         if s.sy in comparison_ops:
             n1.cascade = p_cascaded_cmp(s)
     return n1
 
+def p_starred_expr(s):
+    pos = s.position()
+    if s.sy == '*':
+        starred = True
+        s.next()
+    else:
+        starred = False
+    expr = p_bit_expr(s)
+    if starred:
+        expr = ExprNodes.StarredTargetNode(pos, expr)
+    return expr
+
 def p_cascaded_cmp(s):
     pos = s.position()
     op = p_cmp_op(s)
-    n2 = p_bit_expr(s)
+    n2 = p_starred_expr(s)
     result = ExprNodes.CascadedCmpNode(pos, 
         operator = op, operand2 = n2)
     if s.sy in comparison_ops:
@@ -551,7 +571,7 @@ def p_name(s, name):
             return ExprNodes.IntNode(pos, value = rep, longness = "L")
         elif isinstance(value, float):
             return ExprNodes.FloatNode(pos, value = rep)
-        elif isinstance(value, (str, unicode)):
+        elif isinstance(value, (_str, _bytes)):
             return ExprNodes.StringNode(pos, value = value)
         else:
             error(pos, "Invalid type for compile-time constant: %s"
@@ -583,7 +603,7 @@ def p_cat_string_literal(s):
         if kind == 'u':
             value = EncodedString( u''.join(strings) )
         else:
-            value = BytesLiteral( ''.join(strings) )
+            value = BytesLiteral( StringEncoding.join_bytes(strings) )
             value.encoding = s.source_encoding
     return kind, value
 
@@ -813,7 +833,8 @@ def p_backquote_expr(s):
 def p_simple_expr_list(s):
     exprs = []
     while s.sy not in expr_terminators:
-        exprs.append(p_simple_expr(s))
+        expr = p_simple_expr(s)
+        exprs.append(expr)
         if s.sy != ',':
             break
         s.next()
@@ -899,38 +920,103 @@ def p_expression_or_assignment(s):
             return Nodes.ParallelAssignmentNode(nodes[0].pos, stats = nodes)
 
 def flatten_parallel_assignments(input, output):
-    #  The input is a list of expression nodes, representing 
-    #  the LHSs and RHS of one (possibly cascaded) assignment 
-    #  statement. If they are all sequence constructors with 
-    #  the same number of arguments, rearranges them into a
-    #  list of equivalent assignments between the individual 
-    #  elements. This transformation is applied recursively.
-    size = find_parallel_assignment_size(input)
-    if size >= 0:
-        for i in range(size):
-            new_exprs = [expr.args[i] for expr in input]
-            flatten_parallel_assignments(new_exprs, output)
-    else:
-        output.append(input)
-
-def find_parallel_assignment_size(input):
-    #  The input is a list of expression nodes. If 
-    #  they are all sequence constructors with the same number
-    #  of arguments, return that number, else return -1.
-    #  Produces an error message if they are all sequence
-    #  constructors but not all the same size.
-    for expr in input:
-        if not expr.is_sequence_constructor:
-            return -1
+    #  The input is a list of expression nodes, representing the LHSs
+    #  and RHS of one (possibly cascaded) assignment statement.  For
+    #  sequence constructors, rearranges the matching parts of both
+    #  sides into a list of equivalent assignments between the
+    #  individual elements.  This transformation is applied
+    #  recursively, so that nested structures get matched as well.
     rhs = input[-1]
+    if not rhs.is_sequence_constructor:
+        output.append(input)
+        return
+
     rhs_size = len(rhs.args)
+    lhs_targets = [ [] for _ in range(rhs_size) ]
+    starred_assignments = []
     for lhs in input[:-1]:
+        if not lhs.is_sequence_constructor:
+            if lhs.is_starred:
+                error(lhs.pos, "starred assignment target must be in a list or tuple")
+            output.append([lhs,rhs])
+            continue
         lhs_size = len(lhs.args)
-        if lhs_size != rhs_size:
-            error(lhs.pos, "Unpacking sequence of wrong size (expected %d, got %d)"
-                % (lhs_size, rhs_size))
-            return -1
-    return rhs_size
+        starred_targets = sum([1 for expr in lhs.args if expr.is_starred])
+        if starred_targets:
+            if starred_targets > 1:
+                error(lhs.pos, "more than 1 starred expression in assignment")
+                output.append([lhs,rhs])
+                continue
+            elif lhs_size - starred_targets > rhs_size:
+                error(lhs.pos, "need more than %d value%s to unpack"
+                      % (rhs_size, (rhs_size != 1) and 's' or ''))
+                output.append([lhs,rhs])
+                continue
+            map_starred_assignment(lhs_targets, starred_assignments,
+                                   lhs.args, rhs.args)
+        else:
+            if lhs_size > rhs_size:
+                error(lhs.pos, "need more than %d value%s to unpack"
+                      % (rhs_size, (rhs_size != 1) and 's' or ''))
+                output.append([lhs,rhs])
+                continue
+            elif lhs_size < rhs_size:
+                error(lhs.pos, "too many values to unpack (expected %d, got %d)"
+                      % (lhs_size, rhs_size))
+                output.append([lhs,rhs])
+                continue
+            else:
+                for targets, expr in zip(lhs_targets, lhs.args):
+                    targets.append(expr)
+
+    # recursively flatten partial assignments
+    for cascade, rhs in zip(lhs_targets, rhs.args):
+        if cascade:
+            cascade.append(rhs)
+            flatten_parallel_assignments(cascade, output)
+
+    # recursively flatten starred assignments
+    for cascade in starred_assignments:
+        if cascade[0].is_sequence_constructor:
+            flatten_parallel_assignments(cascade, output)
+        else:
+            output.append(cascade)
+
+def map_starred_assignment(lhs_targets, starred_assignments, lhs_args, rhs_args):
+    # Appends the fixed-position LHS targets to the target list that
+    # appear left and right of the starred argument.
+    #
+    # The starred_assignments list receives a new tuple
+    # (lhs_target, rhs_values_list) that maps the remaining arguments
+    # (those that match the starred target) to a list.
+
+    # left side of the starred target
+    for i, (targets, expr) in enumerate(zip(lhs_targets, lhs_args)):
+        if expr.is_starred:
+            starred = i
+            lhs_remaining = len(lhs_args) - i - 1
+            break
+        targets.append(expr)
+    else:
+        raise InternalError("no starred arg found when splitting starred assignment")
+
+    # right side of the starred target
+    for i, (targets, expr) in enumerate(zip(lhs_targets[-lhs_remaining:],
+                                            lhs_args[-lhs_remaining:])):
+        targets.append(expr)
+
+    # the starred target itself, must be assigned a (potentially empty) list
+    target = lhs_args[starred].target # unpack starred node
+    starred_rhs = rhs_args[starred:]
+    if lhs_remaining:
+        starred_rhs = starred_rhs[:-lhs_remaining]
+    if starred_rhs:
+        pos = starred_rhs[0].pos
+    else:
+        pos = target.pos
+    starred_assignments.append([
+        target, ExprNodes.ListNode(pos=pos, args=starred_rhs)])
+
 
 def p_print_statement(s):
     # s.sy == 'print'
@@ -1275,12 +1361,12 @@ inequality_relations = ('<', '<=', '>', '>=')
 
 def p_target(s, terminator):
     pos = s.position()
-    expr = p_bit_expr(s)
+    expr = p_starred_expr(s)
     if s.sy == ',':
         s.next()
         exprs = [expr]
         while s.sy != terminator:
-            exprs.append(p_bit_expr(s))
+            exprs.append(p_starred_expr(s))
             if s.sy != ',':
                 break
             s.next()
@@ -1344,6 +1430,7 @@ def p_include_statement(s, ctx):
     _, include_file_name = p_string_literal(s)
     s.expect_newline("Syntax error in include statement")
     if s.compile_time_eval:
+        include_file_name = include_file_name.decode(s.source_encoding)
         include_file_path = s.context.find_include_file(include_file_name, pos)
         if include_file_path:
             s.included_files.append(include_file_name)
@@ -1496,8 +1583,8 @@ def p_statement(s, ctx, first_statement = 0):
             s.error('decorator not allowed here')
         s.level = ctx.level
         decorators = p_decorators(s)
-        if s.sy not in ('def', 'cdef', 'cpdef'):
-            s.error("Decorators can only be followed by functions ")
+        if s.sy not in ('def', 'cdef', 'cpdef', 'class'):
+            s.error("Decorators can only be followed by functions or classes")
     elif s.sy == 'pass' and cdef_flag:
         # empty cdef block
         return p_pass_statement(s, with_newline = 1)
@@ -1517,7 +1604,7 @@ def p_statement(s, ctx, first_statement = 0):
         node = p_cdef_statement(s, ctx(overridable = overridable))
         if decorators is not None:
             if not isinstance(node, (Nodes.CFuncDefNode, Nodes.CVarDefNode)):
-                s.error("Decorators can only be followed by functions ")
+                s.error("Decorators can only be followed by functions or Python classes")
             node.decorators = decorators
         return node
     else:
@@ -1531,7 +1618,7 @@ def p_statement(s, ctx, first_statement = 0):
         elif s.sy == 'class':
             if ctx.level != 'module':
                 s.error("class definition not allowed here")
-            return p_class_statement(s)
+            return p_class_statement(s, decorators)
         elif s.sy == 'include':
             if ctx.level not in ('module', 'module_pxd'):
                 s.error("include statement not allowed here")
@@ -1864,6 +1951,8 @@ def p_opt_cname(s):
     literal = p_opt_string_literal(s)
     if literal:
         _, cname = literal
+        cname = EncodedString(cname)
+        cname.encoding = s.source_encoding
     else:
         cname = None
     return cname
@@ -2348,7 +2437,7 @@ def p_py_arg_decl(s):
     name = p_ident(s)
     return Nodes.PyArgDeclNode(pos, name = name)
 
-def p_class_statement(s):
+def p_class_statement(s, decorators):
     # s.sy == 'class'
     pos = s.position()
     s.next()
@@ -2364,7 +2453,7 @@ def p_class_statement(s):
     return Nodes.PyClassDefNode(pos,
         name = class_name,
         bases = ExprNodes.TupleNode(pos, args = base_list),
-        doc = doc, body = body)
+        doc = doc, body = body, decorators = decorators)
 
 def p_c_class_definition(s, pos,  ctx):
     # s.sy == 'class'
@@ -2539,7 +2628,7 @@ def print_parse_tree(f, node, level, key = None):
         if key:
             f.write("%s: " % key)
         t = type(node)
-        if t == TupleType:
+        if t is tuple:
             f.write("(%s @ %s\n" % (node[0], node[1]))
             for i in xrange(2, len(node)):
                 print_parse_tree(f, node[i], level+1)
@@ -2555,7 +2644,7 @@ def print_parse_tree(f, node, level, key = None):
                 if name != 'tag' and name != 'pos':
                     print_parse_tree(f, value, level+1, name)
             return
-        elif t == ListType:
+        elif t is list:
             f.write("[\n")
             for i in xrange(len(node)):
                 print_parse_tree(f, node[i], level+1)

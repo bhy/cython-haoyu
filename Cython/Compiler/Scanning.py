@@ -65,7 +65,7 @@ def hash_source_file(path):
     # tabs by a single space.
     import re
     text = re.sub("[ \t]+", " ", text)
-    hash = new_md5(text).hexdigest()
+    hash = new_md5(text.encode("ASCII")).hexdigest()
     return hash
 
 def open_pickled_lexicon(expected_hash):
@@ -214,14 +214,18 @@ def initial_compile_time_env():
         'UNAME_VERSION', 'UNAME_MACHINE')
     for name, value in zip(names, platform.uname()):
         benv.declare(name, value)
-    import __builtin__
+    import __builtin__ as builtins
     names = ('False', 'True',
         'abs', 'bool', 'chr', 'cmp', 'complex', 'dict', 'divmod', 'enumerate',
         'float', 'hash', 'hex', 'int', 'len', 'list', 'long', 'map', 'max', 'min',
         'oct', 'ord', 'pow', 'range', 'reduce', 'repr', 'round', 'slice', 'str',
         'sum', 'tuple', 'xrange', 'zip')
     for name in names:
-        benv.declare(name, getattr(__builtin__, name))
+        try:
+            benv.declare(name, getattr(builtins, name))
+        except AttributeError:
+            # ignore, likely Py3
+            pass
     denv = CompileTimeScope(benv)
     return denv
 
@@ -232,6 +236,7 @@ class SourceDescriptor(object):
     A SourceDescriptor should be considered immutable.
     """
     _escaped_description = None
+    _cmp_name = ''
     def __str__(self):
         assert False # To catch all places where a descriptor is used directly as a filename
     
@@ -240,6 +245,27 @@ class SourceDescriptor(object):
             self._escaped_description = \
                 self.get_description().encode('ASCII', 'replace').decode("ASCII")
         return self._escaped_description
+
+    def __gt__(self, other):
+        # this is only used to provide some sort of order
+        try:
+            return self._cmp_name > other._cmp_name
+        except AttributeError:
+            return False
+
+    def __lt__(self, other):
+        # this is only used to provide some sort of order
+        try:
+            return self._cmp_name < other._cmp_name
+        except AttributeError:
+            return False
+
+    def __le__(self, other):
+        # this is only used to provide some sort of order
+        try:
+            return self._cmp_name <= other._cmp_name
+        except AttributeError:
+            return False
 
 class FileSourceDescriptor(SourceDescriptor):
     """
@@ -251,6 +277,7 @@ class FileSourceDescriptor(SourceDescriptor):
     """
     def __init__(self, filename):
         self.filename = filename
+        self._cmp_name = filename
     
     def get_lines(self):
         return Utils.open_source_file(self.filename)
@@ -278,6 +305,7 @@ class StringSourceDescriptor(SourceDescriptor):
     def __init__(self, name, code):
         self.name = name
         self.codelines = [x + "\n" for x in code.split("\n")]
+        self._cmp_name = name
     
     def get_lines(self):
         return self.codelines
