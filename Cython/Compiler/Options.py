@@ -61,13 +61,14 @@ option_defaults = {
     'embedsignature' : False,
     'locals' : {},
     'auto_cpdef': False,
-    'cdivision': True,  # Will be False in 0.12
+    'cdivision': False, # was True before 0.12
     'cdivision_warnings': False,
     'always_allow_keywords': False,
     'wraparound' : True,
     'c99_complex' : False, # Don't use macro wrappers for complex arith, not sure what to name this...
     'callspec' : "",
     'profile': False,
+    'doctesthack': False
 }
 
 # Override types possibilities above, if needed
@@ -76,6 +77,11 @@ option_types = {}
 for key, val in option_defaults.items():
     if key not in option_types:
         option_types[key] = type(val)
+
+option_scopes = { # defaults to available everywhere
+    # 'module', 'function', 'class', 'with statement'
+    'doctesthack' : ('module',)
+}
 
 def parse_option_value(name, value):
     """

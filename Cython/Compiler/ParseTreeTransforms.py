@@ -5,7 +5,7 @@ from Cython.Compiler.ExprNodes import *
 from Cython.Compiler.UtilNodes import *
 from Cython.Compiler.TreeFragment import TreeFragment, TemplateTransform
 from Cython.Compiler.StringEncoding import EncodedString
-from Cython.Compiler.Errors import CompileError
+from Cython.Compiler.Errors import error, CompileError
 try:
     set
 except NameError:
@@ -338,14 +338,26 @@ class InterpretCompilerDirectives(CythonTransform, SkipDeclarations):
         self.cython_module_names = set()
         self.option_names = {}
 
+    def check_directive_scope(self, pos, directive, scope):
+        legal_scopes = Options.option_scopes.get(directive, None)
+        if legal_scopes and scope not in legal_scopes:
+            self.context.nonfatal_error(PostParseError(pos, 'The %s compiler directive '
+                                        'is not allowed in %s scope' % (directive, scope)))
+            return False
+        else:
+            return True
+        
     # Set up processing and handle the cython: comments.
     def visit_ModuleNode(self, node):
         options = copy.copy(Options.option_defaults)
         for key, value in self.compilation_option_overrides.iteritems():
+            if not self.check_directive_scope(node.pos, key, 'module'):
+                self.wrong_scope_error(node.pos, key, 'module')
+                del self.compilation_option_overrides[key]
+                continue
             if key in node.option_comments and node.option_comments[key] != value:
                 warning(node.pos, "Compiler directive differs between environment and file header; this will change "
                         "in Cython 0.12. See http://article.gmane.org/gmane.comp.python.cython.devel/5233", 2)
-                break
         options.update(node.option_comments)
         options.update(self.compilation_option_overrides)
         self.options = options
@@ -439,7 +451,7 @@ class InterpretCompilerDirectives(CythonTransform, SkipDeclarations):
                     if kwds is not None or len(args) != 1 or not isinstance(args[0], StringNode):
                         raise PostParseError(dec.function.pos,
                             'The %s option takes one compile-time string argument' % optname)
-                    return (optname, args[0].value)
+                    return (optname, str(args[0].value))
                 elif optiontype is dict:
                     if len(args) != 0:
                         raise PostParseError(dec.function.pos,
@@ -465,7 +477,6 @@ class InterpretCompilerDirectives(CythonTransform, SkipDeclarations):
     # Handle decorators
     def visit_FuncDefNode(self, node):
         options = []
-        
         if node.decorators:
             # Split the decorators into two lists -- real decorators and options
             realdecs = []
@@ -485,7 +496,15 @@ class InterpretCompilerDirectives(CythonTransform, SkipDeclarations):
             options.reverse() # Decorators coming first take precedence
             for option in options:
                 name, value = option
-                optdict[name] = value
+                legal_scopes = Options.option_scopes.get(name, None)
+                if not self.check_directive_scope(node.pos, name, 'function'):
+                    continue
+                if name in optdict and isinstance(optdict[name], dict):
+                    # only keywords can be merged, everything else
+                    # overrides completely
+                    optdict[name].update(value)
+                else:
+                    optdict[name] = value
             body = StatListNode(node.pos, stats=[node])
             return self.visit_with_options(body, optdict)
         else:
@@ -498,7 +517,9 @@ class InterpretCompilerDirectives(CythonTransform, SkipDeclarations):
                 if option is not None and option[0] == u'locals':
                     node.directive_locals = option[1]
                 else:
-                    raise PostParseError(dec.pos, "Cdef functions can only take cython.locals() decorator.")
+                    self.context.nonfatal_error(PostParseError(dec.pos,
+                        "Cdef functions can only take cython.locals() decorator."))
+                    continue
         return node
                                    
     # Handle with statements
@@ -506,11 +527,13 @@ class InterpretCompilerDirectives(CythonTransform, SkipDeclarations):
         option = self.try_to_parse_option(node.manager)
         if option is not None:
             if node.target is not None:
-                raise PostParseError(node.pos, "Compiler option with statements cannot contain 'as'")
-            name, value = option
-            return self.visit_with_options(node.body, {name:value})
-        else:
-            return self.visit_Node(node)
+                self.context.nonfatal_error(
+                    PostParseError(node.pos, "Compiler option with statements cannot contain 'as'"))
+            else:
+                name, value = option
+                if self.check_directive_scope(node.pos, name, 'with statement'):
+                    return self.visit_with_options(node.body, {name:value})
+        return self.visit_Node(node)
 
 class WithTransform(CythonTransform, SkipDeclarations):
 
@@ -597,22 +620,48 @@ class WithTransform(CythonTransform, SkipDeclarations):
 class DecoratorTransform(CythonTransform, SkipDeclarations):
 
     def visit_DefNode(self, func_node):
+        self.visitchildren(func_node)
         if not func_node.decorators:
             return func_node
+        return self._handle_decorators(
+            func_node, func_node.name)
 
-        decorator_result = NameNode(func_node.pos, name = func_node.name)
-        for decorator in func_node.decorators[::-1]:
+    def _visit_CClassDefNode(self, class_node):
+        # This doesn't currently work, so it's disabled (also in the
+        # parser).
+        #
+        # Problem: assignments to cdef class names do not work.  They
+        # would require an additional check anyway, as the extension
+        # type must not change its C type, so decorators cannot
+        # replace an extension type, just alter it and return it.
+
+        self.visitchildren(class_node)
+        if not class_node.decorators:
+            return class_node
+        return self._handle_decorators(
+            class_node, class_node.class_name)
+
+    def visit_ClassDefNode(self, class_node):
+        self.visitchildren(class_node)
+        if not class_node.decorators:
+            return class_node
+        return self._handle_decorators(
+            class_node, class_node.name)
+
+    def _handle_decorators(self, node, name):
+        decorator_result = NameNode(node.pos, name = name)
+        for decorator in node.decorators[::-1]:
             decorator_result = SimpleCallNode(
                 decorator.pos,
                 function = decorator.decorator,
                 args = [decorator_result])
 
-        func_name_node = NameNode(func_node.pos, name = func_node.name)
+        name_node = NameNode(node.pos, name = name)
         reassignment = SingleAssignmentNode(
-            func_node.pos,
-            lhs = func_name_node,
+            node.pos,
+            lhs = name_node,
             rhs = decorator_result)
-        return [func_node, reassignment]
+        return [node, reassignment]
 
 
 class AnalyseDeclarationsTransform(CythonTransform):
@@ -833,7 +882,45 @@ class CreateClosureClasses(CythonTransform):
     def visit_FuncDefNode(self, node):
         self.create_class_from_scope(node, self.module_scope)
         return node
-        
+
+
+class GilCheck(VisitorTransform):
+    """
+    Call `node.gil_check(env)` on each node to make sure we hold the
+    GIL when we need it.  Raise an error when on Python operations
+    inside a `nogil` environment.
+    """
+    def __call__(self, root):
+        self.env_stack = [root.scope]
+        self.nogil = False
+        return super(GilCheck, self).__call__(root)
+
+    def visit_FuncDefNode(self, node):
+        self.env_stack.append(node.local_scope)
+        was_nogil = self.nogil
+        self.nogil = node.local_scope.nogil
+        if self.nogil and node.nogil_check:
+            node.nogil_check(node.local_scope)
+        self.visitchildren(node)
+        self.env_stack.pop()
+        self.nogil = was_nogil
+        return node
+
+    def visit_GILStatNode(self, node):
+        env = self.env_stack[-1]
+        if self.nogil and node.nogil_check: node.nogil_check()
+        was_nogil = self.nogil
+        self.nogil = (node.state == 'nogil')
+        self.visitchildren(node)
+        self.nogil = was_nogil
+        return node
+
+    def visit_Node(self, node):
+        if self.env_stack and self.nogil and node.nogil_check:
+            node.nogil_check(self.env_stack[-1])
+        self.visitchildren(node)
+        return node
+
 
 class EnvTransform(CythonTransform):
     """
