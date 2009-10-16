@@ -952,7 +952,7 @@ complex_ops = {
 }
 
 complex_header_utility_code = UtilityCode(
-proto_block='utility_code_proto_before_types',
+proto_block='h_code',
 proto="""
 #if !defined(CYTHON_CCOMPLEX)
   #if defined(__cplusplus)
@@ -1004,7 +1004,7 @@ proto="""
 """)
 
 complex_from_parts_utility_code = UtilityCode(
-proto_block='utility_code_proto_before_types',
+proto_block='utility_code_proto',
 proto="""
 #if CYTHON_CCOMPLEX
   #ifdef __cplusplus
