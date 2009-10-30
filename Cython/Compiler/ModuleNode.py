@@ -271,6 +271,10 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
         code = globalstate['all_the_rest']
 
         self.generate_cached_builtins_decls(env, code)
+        # generate lambda function definitions
+        for node in env.lambda_defs:
+            node.generate_function_definitions(env, code)
+        # generate normal function definitions
         self.body.generate_function_definitions(env, code)
         code.mark_pos(None)
         self.generate_typeobj_definitions(env, code)
@@ -948,7 +952,8 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
                 type.vtabslot_cname,
                 struct_type_cast, type.vtabptr_cname))
         for entry in py_attrs:
-            if entry.name == "__weakref__":
+            if scope.is_internal or entry.name == "__weakref__":
+                # internal classes do not need None inits
                 code.putln("p->%s = 0;" % entry.cname)
             else:
                 code.put_init_var_to_py_none(entry, "p->%s", nanny=False)
