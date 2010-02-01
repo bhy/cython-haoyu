@@ -407,6 +407,7 @@ class GlobalState(object):
 
     code_layout = [
         'h_code',
+        'filename_table',
         'utility_code_proto_before_types',
         'numeric_typedefs',          # Let these detailed individual parts stay!,
         'complex_type_declarations', # as the proper solution is to make a full DAG...
@@ -425,7 +426,6 @@ class GlobalState(object):
         'cleanup_globals',
         'cleanup_module',
         'main_method',
-        'filename_table',
         'utility_code_def',
         'end'
     ]
@@ -484,11 +484,6 @@ class GlobalState(object):
             code.write('\n#line 1 "cython_utility"\n')
         code.putln("")
         code.putln("/* Runtime support code */")
-        code.putln("")
-        code.putln("static void %s(void) {" % Naming.fileinit_cname)
-        code.putln("%s = %s;" % 
-            (Naming.filetable_cname, Naming.filenames_cname))
-        code.putln("}")
 
     def finalize_main_c_code(self):
         self.close_global_decls()
@@ -619,15 +614,30 @@ class GlobalState(object):
     def add_cached_builtin_decl(self, entry):
         if Options.cache_builtins:
             if self.should_declare(entry.cname, entry):
-                interned_cname = self.get_interned_identifier(entry.name).cname
                 self.put_pyobject_decl(entry)
                 w = self.parts['cached_builtins']
-                w.putln('%s = __Pyx_GetName(%s, %s); if (!%s) %s' % (
-                    entry.cname,
-                    Naming.builtins_cname,
-                    interned_cname,
-                    entry.cname,
-                    w.error_goto(entry.pos)))
+                if entry.name == 'xrange':
+                    # replaced by range() in Py3
+                    w.putln('#if PY_MAJOR_VERSION >= 3')
+                    self.put_cached_builtin_init(
+                        entry.pos, StringEncoding.EncodedString('range'),
+                        entry.cname)
+                    w.putln('#else')
+                self.put_cached_builtin_init(
+                    entry.pos, StringEncoding.EncodedString(entry.name),
+                    entry.cname)
+                if entry.name == 'xrange':
+                    w.putln('#endif')
+
+    def put_cached_builtin_init(self, pos, name, cname):
+        w = self.parts['cached_builtins']
+        interned_cname = self.get_interned_identifier(name).cname
+        w.putln('%s = __Pyx_GetName(%s, %s); if (!%s) %s' % (
+            cname,
+            Naming.builtins_cname,
+            interned_cname,
+            cname,
+            w.error_goto(pos)))
 
     def generate_const_declarations(self):
         self.generate_string_constants()
@@ -1281,6 +1291,9 @@ class CCodeWriter(object):
     def put_finish_refcount_context(self):
         self.putln("__Pyx_RefNannyFinishContext();")
 
+    def put_trace_declarations(self):
+        self.putln('__Pyx_TraceDeclarations');
+    
     def put_trace_call(self, name, pos):
         self.putln('__Pyx_TraceCall("%s", %s[%s], %s);' % (name, Naming.filetable_cname, self.lookup_filename(pos[0]), pos[1]));
     

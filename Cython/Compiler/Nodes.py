@@ -597,16 +597,20 @@ class CArgDeclNode(Node):
     # not_none       boolean            Tagged with 'not None'
     # default        ExprNode or None
     # default_value  PyObjectConst      constant for default value
+    # annotation     ExprNode or None   Py3 function arg annotation
     # is_self_arg    boolean            Is the "self" arg of an extension type method
+    # is_type_arg    boolean            Is the "class" arg of an extension type classmethod
     # is_kw_only     boolean            Is a keyword-only argument
 
     child_attrs = ["base_type", "declarator", "default"]
 
     is_self_arg = 0
+    is_type_arg = 0
     is_generic = 1
     type = None
     name_declarator = None
     default_value = None
+    annotation = None
 
     def analyse(self, env, nonempty = 0):
         #print "CArgDeclNode.analyse: is_self_arg =", self.is_self_arg ###
@@ -669,6 +673,7 @@ class CSimpleBaseTypeNode(CBaseTypeNode):
     # longness         integer
     # complex          boolean
     # is_self_arg      boolean      Is self argument of C method
+    # ##is_type_arg      boolean      Is type argument of class method
 
     child_attrs = []
     arg_name = None   # in case the argument name was interpreted as a type
@@ -687,6 +692,8 @@ class CSimpleBaseTypeNode(CBaseTypeNode):
             if self.is_self_arg and env.is_c_class_scope:
                 #print "CSimpleBaseTypeNode.analyse: defaulting to parent type" ###
                 type = env.parent_type
+            ## elif self.is_type_arg and env.is_c_class_scope:
+            ##     type = Builtin.type_type
             else:
                 type = py_object_type
         else:
@@ -703,6 +710,8 @@ class CSimpleBaseTypeNode(CBaseTypeNode):
                 elif could_be_name:
                     if self.is_self_arg and env.is_c_class_scope:
                         type = env.parent_type
+                    ## elif self.is_type_arg and env.is_c_class_scope:
+                    ##     type = Builtin.type_type
                     else:
                         type = py_object_type
                     self.arg_name = self.name
@@ -1071,7 +1080,7 @@ class FuncDefNode(StatNode, BlockNode):
         self.generate_cached_builtins_decls(lenv, code)
         # ----- Function header
         code.putln("")
-        with_pymethdef = env.is_py_class_scope or env.is_closure_scope
+        with_pymethdef = self.needs_assignment_synthesis(env, code)
         if self.py_func:
             self.py_func.generate_function_header(code, 
                 with_pymethdef = with_pymethdef,
@@ -1099,6 +1108,8 @@ class FuncDefNode(StatNode, BlockNode):
                      init))
         tempvardecl_code = code.insertion_point()
         self.generate_keyword_list(code)
+        if profile:
+            code.put_trace_declarations()
         # ----- Extern library function declarations
         lenv.generate_library_function_declarations(code)
         # ----- GIL acquisition
@@ -1479,6 +1490,9 @@ class CFuncDefNode(FuncDefNode):
             self.analyse_default_values(env)
         self.acquire_gil = self.need_gil_acquisition(self.local_scope)
 
+    def needs_assignment_synthesis(self, env, code=None):
+        return False
+
     def generate_function_header(self, code, with_pymethdef, with_opt_args = 1, with_dispatch = 1, cname = None):
         arg_decls = []
         type = self.type
@@ -1508,6 +1522,8 @@ class CFuncDefNode(FuncDefNode):
             storage_class = ""
         else:
             storage_class = "static "
+        if 'inline' in self.modifiers:
+            self.modifiers[self.modifiers.index('inline')] = 'cython_inline'
         code.putln("%s%s %s {" % (
             storage_class,
             ' '.join(self.modifiers).upper(), # macro forms 
@@ -1612,8 +1628,9 @@ class PyArgDeclNode(Node):
     # Argument which must be a Python object (used
     # for * and ** arguments).
     #
-    # name   string
-    # entry  Symtab.Entry
+    # name        string
+    # entry       Symtab.Entry
+    # annotation  ExprNode or None   Py3 argument annotation
     child_attrs = []
 
     def generate_function_definitions(self, env, code):
@@ -1637,6 +1654,8 @@ class DefNode(FuncDefNode):
     # starstar_arg  PyArgDeclNode or None  ** argument
     # doc           EncodedString or None
     # body          StatListNode
+    # return_type_annotation
+    #               ExprNode or None       the Py3 return type annotation
     #
     #  The following subnode is constructed internally
     #  when the def statement is inside a Python class definition.
@@ -1652,9 +1671,10 @@ class DefNode(FuncDefNode):
     reqd_kw_flags_cname = "0"
     is_wrapper = 0
     decorators = None
+    return_type_annotation = None
     entry = None
     acquire_gil = 0
-    
+    self_in_stararg = 0
 
     def __init__(self, pos, **kwds):
         FuncDefNode.__init__(self, pos, **kwds)
@@ -1696,7 +1716,7 @@ class DefNode(FuncDefNode):
             cfunc_type = cfunc.type
             if len(self.args) != len(cfunc_type.args) or cfunc_type.has_varargs:
                 error(self.pos, "wrong number of arguments")
-                error(declarator.pos, "previous declaration here")
+                error(cfunc.pos, "previous declaration here")
             for formal_arg, type_arg in zip(self.args, cfunc_type.args):
                 name_declarator, type = formal_arg.analyse(cfunc.scope, nonempty=1)
                 if type is None or type is PyrexTypes.py_object_type or formal_arg.is_self:
@@ -1730,6 +1750,31 @@ class DefNode(FuncDefNode):
                             directive_locals = getattr(cfunc, 'directive_locals', {}))
     
     def analyse_declarations(self, env):
+        self.is_classmethod = self.is_staticmethod = False
+        if self.decorators:
+            for decorator in self.decorators:
+                func = decorator.decorator
+                if func.is_name:
+                    self.is_classmethod |= func.name == 'classmethod'
+                    self.is_staticmethod |= func.name == 'staticmethod'
+
+        if self.is_classmethod and env.lookup_here('classmethod'):
+            # classmethod() was overridden - not much we can do here ...
+            self.is_classmethod = False
+        if self.is_staticmethod and env.lookup_here('staticmethod'):
+            # staticmethod() was overridden - not much we can do here ...
+            self.is_staticmethod = False
+
+        self.analyse_argument_types(env)
+        if self.name == '<lambda>':
+            self.declare_lambda_function(env)
+        else:
+            self.declare_pyfunction(env)
+        self.analyse_signature(env)
+        self.return_type = self.entry.signature.return_type()
+        self.create_local_scope(env)
+
+    def analyse_argument_types(self, env):
         directive_locals = self.directive_locals = env.directives['locals']
         for arg in self.args:
             if hasattr(arg, 'name'):
@@ -1762,13 +1807,6 @@ class DefNode(FuncDefNode):
             if arg.not_none and not arg.type.is_extension_type:
                 error(self.pos,
                     "Only extension type arguments can have 'not None'")
-        if self.name == '<lambda>':
-            self.declare_lambda_function(env)
-        else:
-            self.declare_pyfunction(env)
-        self.analyse_signature(env)
-        self.return_type = self.entry.signature.return_type()
-        self.create_local_scope(env)
 
     def analyse_signature(self, env):
         any_type_tests_needed = 0
@@ -1788,32 +1826,46 @@ class DefNode(FuncDefNode):
                 elif len(self.args) == 2:
                     if self.args[1].default is None and not self.args[1].kw_only:
                         self.entry.signature = TypeSlots.ibinaryfunc
+
         sig = self.entry.signature
         nfixed = sig.num_fixed_args()
-        for i in range(nfixed):
-            if i < len(self.args):
-                arg = self.args[i]
-                arg.is_generic = 0
-                if sig.is_self_arg(i):
+        if sig is TypeSlots.pymethod_signature and nfixed == 1 \
+               and len(self.args) == 0 and self.star_arg:
+            # this is the only case where a diverging number of
+            # arguments is not an error - when we have no explicit
+            # 'self' parameter as in method(*args)
+            sig = self.entry.signature = TypeSlots.pyfunction_signature # self is not 'really' used
+            self.self_in_stararg = 1
+            nfixed = 0
+
+        for i in range(min(nfixed, len(self.args))):
+            arg = self.args[i]
+            arg.is_generic = 0
+            if sig.is_self_arg(i) and not self.is_staticmethod:
+                if self.is_classmethod:
+                    arg.is_type_arg = 1
+                    arg.hdr_type = arg.type = Builtin.type_type
+                else:
                     arg.is_self_arg = 1
                     arg.hdr_type = arg.type = env.parent_type
-                    arg.needs_conversion = 0
-                else:
-                    arg.hdr_type = sig.fixed_arg_type(i)
-                    if not arg.type.same_as(arg.hdr_type):
-                        if arg.hdr_type.is_pyobject and arg.type.is_pyobject:
-                            arg.needs_type_test = 1
-                            any_type_tests_needed = 1
-                        else:
-                            arg.needs_conversion = 1
-                if arg.needs_conversion:
-                    arg.hdr_cname = Naming.arg_prefix + arg.name
-                else:
-                    arg.hdr_cname = Naming.var_prefix + arg.name
+                arg.needs_conversion = 0
             else:
-                self.bad_signature()
-                return
-        if nfixed < len(self.args):
+                arg.hdr_type = sig.fixed_arg_type(i)
+                if not arg.type.same_as(arg.hdr_type):
+                    if arg.hdr_type.is_pyobject and arg.type.is_pyobject:
+                        arg.needs_type_test = 1
+                        any_type_tests_needed = 1
+                    else:
+                        arg.needs_conversion = 1
+            if arg.needs_conversion:
+                arg.hdr_cname = Naming.arg_prefix + arg.name
+            else:
+                arg.hdr_cname = Naming.var_prefix + arg.name
+
+        if nfixed > len(self.args):
+            self.bad_signature()
+            return
+        elif nfixed < len(self.args):
             if not sig.has_generic_args:
                 self.bad_signature()
             for arg in self.args:
@@ -1823,7 +1875,7 @@ class DefNode(FuncDefNode):
                     any_type_tests_needed = 1
         if any_type_tests_needed:
             env.use_utility_code(arg_type_test_utility_code)
-    
+
     def bad_signature(self):
         sig = self.entry.signature
         expected_str = "%d" % sig.num_fixed_args()
@@ -1841,7 +1893,9 @@ class DefNode(FuncDefNode):
 
     def signature_has_nongeneric_args(self):
         argcount = len(self.args)
-        if argcount == 0 or (argcount == 1 and self.args[0].is_self_arg):
+        if argcount == 0 or (
+                argcount == 1 and (self.args[0].is_self_arg or
+                                   self.args[0].is_type_arg)):
             return 0
         return 1
 
@@ -1897,7 +1951,7 @@ class DefNode(FuncDefNode):
             arg.entry.used = 1
             arg.entry.is_self_arg = arg.is_self_arg
             if arg.hdr_type:
-                if arg.is_self_arg or \
+                if arg.is_self_arg or arg.is_type_arg or \
                     (arg.type.is_extension_type and not arg.hdr_type.is_extension_type):
                         arg.entry.is_declared_generic = 1
         self.declare_python_arg(env, self.star_arg)
@@ -1905,8 +1959,11 @@ class DefNode(FuncDefNode):
 
     def declare_python_arg(self, env, arg):
         if arg:
-            entry = env.declare_var(arg.name, 
-                PyrexTypes.py_object_type, arg.pos)
+            if env.directives['infer_types'] != 'none':
+                type = PyrexTypes.unspecified_type
+            else:
+                type = py_object_type
+            entry = env.declare_var(arg.name, type, arg.pos)
             entry.used = 1
             entry.init = "0"
             entry.init_to_none = 0
@@ -1917,9 +1974,18 @@ class DefNode(FuncDefNode):
     def analyse_expressions(self, env):
         self.local_scope.directives = env.directives
         self.analyse_default_values(env)
-        if env.is_py_class_scope or env.is_closure_scope:
+        if self.needs_assignment_synthesis(env):
             # Shouldn't we be doing this at the module level too?
             self.synthesize_assignment_node(env)
+
+    def needs_assignment_synthesis(self, env, code=None):
+        # Should enable for module level as well, that will require more testing...
+        if env.is_module_scope:
+            if code is None:
+                return env.directives['binding']
+            else:
+                return code.globalstate.directives['binding']
+        return env.is_py_class_scope or env.is_closure_scope
 
     def synthesize_assignment_node(self, env):
         import ExprNodes
@@ -1930,6 +1996,9 @@ class DefNode(FuncDefNode):
         elif env.is_closure_scope:
             rhs = ExprNodes.InnerFunctionNode(
                 self.pos, pymethdef_cname = self.entry.pymethdef_cname)
+        else:
+            rhs = ExprNodes.PyCFunctionNode(
+                self.pos, pymethdef_cname = self.entry.pymethdef_cname, binding = env.directives['binding'])
         self.assmt = SingleAssignmentNode(self.pos,
             lhs = ExprNodes.NameNode(self.pos, name = self.name),
             rhs = rhs)
@@ -1939,12 +2008,12 @@ class DefNode(FuncDefNode):
     def generate_function_header(self, code, with_pymethdef, proto_only=0):
         arg_code_list = []
         sig = self.entry.signature
-        if sig.has_dummy_arg:
+        if sig.has_dummy_arg or self.self_in_stararg:
             arg_code_list.append(
                 "PyObject *%s" % Naming.self_cname)
         for arg in self.args:
             if not arg.is_generic:
-                if arg.is_self_arg:
+                if arg.is_self_arg or arg.is_type_arg:
                     arg_code_list.append("PyObject *%s" % arg.hdr_cname)
                 else:
                     arg_code_list.append(
@@ -1999,7 +2068,7 @@ class DefNode(FuncDefNode):
     def generate_argument_parsing_code(self, env, code):
         # Generate PyArg_ParseTuple call for generic
         # arguments, if any.
-        if self.entry.signature.has_dummy_arg:
+        if self.entry.signature.has_dummy_arg and not self.self_in_stararg:
             # get rid of unused argument warning
             code.putln("%s = %s;" % (Naming.self_cname, Naming.self_cname))
 
@@ -2032,14 +2101,14 @@ class DefNode(FuncDefNode):
                 arg_entry = arg.entry
                 if arg.is_generic:
                     if arg.default:
-                        if not arg.is_self_arg:
+                        if not arg.is_self_arg and not arg.is_type_arg:
                             if arg.kw_only:
                                 kw_only_args.append(arg)
                             else:
                                 positional_args.append(arg)
                     elif arg.kw_only:
                         kw_only_args.append(arg)
-                    elif not arg.is_self_arg:
+                    elif not arg.is_self_arg and not arg.is_type_arg:
                         positional_args.append(arg)
 
             self.generate_tuple_and_keyword_parsing_code(
@@ -2119,9 +2188,38 @@ class DefNode(FuncDefNode):
                     self.starstar_arg.entry.cname, self.error_value()))
             self.starstar_arg.entry.xdecref_cleanup = 0
             code.put_gotref(self.starstar_arg.entry.cname)
-            
 
-        if self.star_arg:
+        if self.self_in_stararg:
+            # need to create a new tuple with 'self' inserted as first item
+            code.put("%s = PyTuple_New(PyTuple_GET_SIZE(%s)+1); if (unlikely(!%s)) " % (
+                    self.star_arg.entry.cname,
+                    Naming.args_cname,
+                    self.star_arg.entry.cname))
+            if self.starstar_arg:
+                code.putln("{")
+                code.put_decref(self.starstar_arg.entry.cname, py_object_type)
+                code.putln("return %s;" % self.error_value())
+                code.putln("}")
+            else:
+                code.putln("return %s;" % self.error_value())
+            code.put_gotref(self.star_arg.entry.cname)
+            code.put_incref(Naming.self_cname, py_object_type)
+            code.put_giveref(Naming.self_cname)
+            code.putln("PyTuple_SET_ITEM(%s, 0, %s);" % (
+                self.star_arg.entry.cname, Naming.self_cname))
+            temp = code.funcstate.allocate_temp(PyrexTypes.c_py_ssize_t_type, manage_ref=False)
+            code.putln("for (%s=0; %s < PyTuple_GET_SIZE(%s); %s++) {" % (
+                temp, temp, Naming.args_cname, temp))
+            code.putln("PyObject* item = PyTuple_GET_ITEM(%s, %s);" % (
+                Naming.args_cname, temp))
+            code.put_incref("item", py_object_type)
+            code.put_giveref("item")
+            code.putln("PyTuple_SET_ITEM(%s, %s+1, item);" % (
+                self.star_arg.entry.cname, temp))
+            code.putln("}")
+            code.funcstate.release_temp(temp)
+            self.star_arg.entry.xdecref_cleanup = 0
+        elif self.star_arg:
             code.put_incref(Naming.args_cname, py_object_type)
             code.putln("%s = %s;" % (
                     self.star_arg.entry.cname,
@@ -2133,7 +2231,7 @@ class DefNode(FuncDefNode):
         argtuple_error_label = code.new_label("argtuple_error")
 
         min_positional_args = self.num_required_args - self.num_required_kw_args
-        if len(self.args) > 0 and self.args[0].is_self_arg:
+        if len(self.args) > 0 and (self.args[0].is_self_arg or self.args[0].is_type_arg):
             min_positional_args -= 1
         max_positional_args = len(positional_args)
         has_fixed_positional_count = not self.star_arg and \
@@ -3079,10 +3177,11 @@ class CascadedAssignmentNode(AssignmentNode):
     
     def analyse_types(self, env, use_temp = 0):
         self.rhs.analyse_types(env)
-        if use_temp:
-            self.rhs = self.rhs.coerce_to_temp(env)
-        else:
-            self.rhs = self.rhs.coerce_to_simple(env)
+        if not self.rhs.is_simple():
+            if use_temp:
+                self.rhs = self.rhs.coerce_to_temp(env)
+            else:
+                self.rhs = self.rhs.coerce_to_simple(env)
         from ExprNodes import CloneNode
         self.coerced_rhs_list = []
         for lhs in self.lhs_list:
@@ -3773,9 +3872,6 @@ class IfClauseNode(Node):
         self.condition.generate_disposal_code(code)
         self.condition.free_temps(code)
         self.body.generate_execution_code(code)
-        #code.putln(
-        #    "goto %s;" %
-        #        end_label)
         code.put_goto(end_label)
         code.putln("}")
 
@@ -4654,12 +4750,8 @@ class TryFinallyStatNode(StatNode):
         code.putln(
                 "%s = %s;" % (
                     Naming.exc_lineno_name, Naming.lineno_cname))
-        #code.putln(
-        #        "goto %s;" %
-        #            catch_label)
         code.put_goto(catch_label)
-        code.putln(
-            "}")
+        code.putln("}")
             
     def put_error_uncatcher(self, code, i, error_label):
         code.globalstate.use_utility_code(restore_exception_utility_code)
@@ -4923,12 +5015,14 @@ class FromImportStatNode(StatNode):
 
 utility_function_predeclarations = \
 """
-#ifdef __GNUC__
-#define INLINE __inline__
-#elif _WIN32
-#define INLINE __inline
-#else
-#define INLINE 
+#ifndef CYTHON_INLINE
+  #if defined(__GNUC__)
+    #define CYTHON_INLINE __inline__
+  #elif defined(_MSC_VER)
+    #define CYTHON_INLINE __inline
+  #else
+    #define CYTHON_INLINE 
+  #endif
 #endif
 
 typedef struct {PyObject **p; char *s; const long n; const char* encoding; const char is_unicode; const char is_str; const char intern; } __Pyx_StringTabEntry; /*proto*/
@@ -5115,11 +5209,11 @@ requires=[printing_utility_code])
 
 restore_exception_utility_code = UtilityCode(
 proto = """
-static INLINE void __Pyx_ErrRestore(PyObject *type, PyObject *value, PyObject *tb); /*proto*/
-static INLINE void __Pyx_ErrFetch(PyObject **type, PyObject **value, PyObject **tb); /*proto*/
+static CYTHON_INLINE void __Pyx_ErrRestore(PyObject *type, PyObject *value, PyObject *tb); /*proto*/
+static CYTHON_INLINE void __Pyx_ErrFetch(PyObject **type, PyObject **value, PyObject **tb); /*proto*/
 """,
 impl = """
-static INLINE void __Pyx_ErrRestore(PyObject *type, PyObject *value, PyObject *tb) {
+static CYTHON_INLINE void __Pyx_ErrRestore(PyObject *type, PyObject *value, PyObject *tb) {
     PyObject *tmp_type, *tmp_value, *tmp_tb;
     PyThreadState *tstate = PyThreadState_GET();
 
@@ -5134,7 +5228,7 @@ static INLINE void __Pyx_ErrRestore(PyObject *type, PyObject *value, PyObject *t
     Py_XDECREF(tmp_tb);
 }
 
-static INLINE void __Pyx_ErrFetch(PyObject **type, PyObject **value, PyObject **tb) {
+static CYTHON_INLINE void __Pyx_ErrFetch(PyObject **type, PyObject **value, PyObject **tb) {
     PyThreadState *tstate = PyThreadState_GET();
     *type = tstate->curexc_type;
     *value = tstate->curexc_value;
@@ -5354,11 +5448,11 @@ requires=[get_exception_utility_code])
 
 reset_exception_utility_code = UtilityCode(
 proto = """
-static INLINE void __Pyx_ExceptionSave(PyObject **type, PyObject **value, PyObject **tb); /*proto*/
+static CYTHON_INLINE void __Pyx_ExceptionSave(PyObject **type, PyObject **value, PyObject **tb); /*proto*/
 static void __Pyx_ExceptionReset(PyObject *type, PyObject *value, PyObject *tb); /*proto*/
 """,
 impl = """
-static INLINE void __Pyx_ExceptionSave(PyObject **type, PyObject **value, PyObject **tb) {
+static CYTHON_INLINE void __Pyx_ExceptionSave(PyObject **type, PyObject **value, PyObject **tb) {
     PyThreadState *tstate = PyThreadState_GET();
     *type = tstate->exc_type;
     *value = tstate->exc_value;
@@ -5457,10 +5551,10 @@ static void __Pyx_RaiseArgtupleInvalid(
 
 raise_keyword_required_utility_code = UtilityCode(
 proto = """
-static INLINE void __Pyx_RaiseKeywordRequired(const char* func_name, PyObject* kw_name); /*proto*/
+static CYTHON_INLINE void __Pyx_RaiseKeywordRequired(const char* func_name, PyObject* kw_name); /*proto*/
 """,
 impl = """
-static INLINE void __Pyx_RaiseKeywordRequired(
+static CYTHON_INLINE void __Pyx_RaiseKeywordRequired(
     const char* func_name,
     PyObject* kw_name)
 {
@@ -5502,11 +5596,11 @@ static void __Pyx_RaiseDoubleKeywordsError(
 
 keyword_string_check_utility_code = UtilityCode(
 proto = """
-static INLINE int __Pyx_CheckKeywordStrings(PyObject *kwdict,
+static CYTHON_INLINE int __Pyx_CheckKeywordStrings(PyObject *kwdict,
     const char* function_name, int kw_allowed); /*proto*/
 """,
 impl = """
-static INLINE int __Pyx_CheckKeywordStrings(
+static CYTHON_INLINE int __Pyx_CheckKeywordStrings(
     PyObject *kwdict,
     const char* function_name,
     int kw_allowed)
@@ -5851,11 +5945,11 @@ static int __Pyx_InitStrings(__Pyx_StringTabEntry *t) {
 force_init_threads_utility_code = UtilityCode(
 proto="""
 #ifndef __PYX_FORCE_INIT_THREADS
-#if PY_VERSION_HEX < 0x02040200
-#define __PYX_FORCE_INIT_THREADS 1
-#else
-#define __PYX_FORCE_INIT_THREADS 0
-#endif
+  #if PY_VERSION_HEX < 0x02040200
+    #define __PYX_FORCE_INIT_THREADS 1
+  #else
+    #define __PYX_FORCE_INIT_THREADS 0
+  #endif
 #endif
 """)
 
@@ -5866,59 +5960,64 @@ proto="""
 
 profile_utility_code = UtilityCode(proto="""
 #ifndef CYTHON_PROFILE
-#define CYTHON_PROFILE 1
+  #define CYTHON_PROFILE 1
 #endif
 
 #ifndef CYTHON_PROFILE_REUSE_FRAME
-#define CYTHON_PROFILE_REUSE_FRAME 0
+  #define CYTHON_PROFILE_REUSE_FRAME 0
 #endif
 
 #if CYTHON_PROFILE
 
-#include "compile.h"
-#include "frameobject.h"
-#include "traceback.h"
+  #include "compile.h"
+  #include "frameobject.h"
+  #include "traceback.h"
 
-#if CYTHON_PROFILE_REUSE_FRAME
-#define CYTHON_FRAME_MODIFIER static
-#define CYTHON_FRAME_DEL
+  #if CYTHON_PROFILE_REUSE_FRAME
+    #define CYTHON_FRAME_MODIFIER static
+    #define CYTHON_FRAME_DEL
+  #else
+    #define CYTHON_FRAME_MODIFIER
+    #define CYTHON_FRAME_DEL Py_DECREF(%(FRAME)s)
+  #endif
+
+  #define __Pyx_TraceDeclarations                                  \\
+  static PyCodeObject *%(FRAME_CODE)s = NULL;                      \\
+  CYTHON_FRAME_MODIFIER PyFrameObject *%(FRAME)s = NULL;           \\
+  int __Pyx_use_tracing = 0;                                                         
+
+  #define __Pyx_TraceCall(funcname, srcfile, firstlineno)                            \\
+  if (unlikely(PyThreadState_GET()->use_tracing && PyThreadState_GET()->c_profilefunc)) {      \\
+      __Pyx_use_tracing = __Pyx_TraceSetupAndCall(&%(FRAME_CODE)s, &%(FRAME)s, funcname, srcfile, firstlineno);  \\
+  }
+
+  #define __Pyx_TraceException()                                                           \\
+  if (unlikely(__Pyx_use_tracing( && PyThreadState_GET()->use_tracing && PyThreadState_GET()->c_profilefunc) {  \\
+      PyObject *exc_info = __Pyx_GetExceptionTuple();                                      \\
+      if (exc_info) {                                                                      \\
+          PyThreadState_GET()->c_profilefunc(                                              \\
+              PyThreadState_GET()->c_profileobj, %(FRAME)s, PyTrace_EXCEPTION, exc_info);  \\
+          Py_DECREF(exc_info);                                                             \\
+      }                                                                                    \\
+  }
+
+  #define __Pyx_TraceReturn(result)                                                  \\
+  if (unlikely(__Pyx_use_tracing) && PyThreadState_GET()->use_tracing && PyThreadState_GET()->c_profilefunc) {  \\
+      PyThreadState_GET()->c_profilefunc(                                            \\
+          PyThreadState_GET()->c_profileobj, %(FRAME)s, PyTrace_RETURN, (PyObject*)result);     \\
+      CYTHON_FRAME_DEL;                                                               \\
+  }
+
+  static PyCodeObject *__Pyx_createFrameCodeObject(const char *funcname, const char *srcfile, int firstlineno); /*proto*/
+  static int __Pyx_TraceSetupAndCall(PyCodeObject** code, PyFrameObject** frame, const char *funcname, const char *srcfile, int firstlineno); /*proto*/
+
 #else
-#define CYTHON_FRAME_MODIFIER
-#define CYTHON_FRAME_DEL Py_DECREF(%(FRAME)s)
-#endif
 
-#define __Pyx_TraceCall(funcname, srcfile, firstlineno)                            \\
-static PyCodeObject *%(FRAME_CODE)s = NULL;                                        \\
-CYTHON_FRAME_MODIFIER PyFrameObject *%(FRAME)s = NULL;                             \\
-int __Pyx_use_tracing = 0;                                                         \\
-if (unlikely(PyThreadState_GET()->use_tracing && PyThreadState_GET()->c_profilefunc)) {      \\
-    __Pyx_use_tracing = __Pyx_TraceSetupAndCall(&%(FRAME_CODE)s, &%(FRAME)s, funcname, srcfile, firstlineno);  \\
-}
+  #define __Pyx_TraceDeclarations
+  #define __Pyx_TraceCall(funcname, srcfile, firstlineno) 
+  #define __Pyx_TraceException() 
+  #define __Pyx_TraceReturn(result) 
 
-#define __Pyx_TraceException()                                                           \\
-if (unlikely(__Pyx_use_tracing( && PyThreadState_GET()->use_tracing && PyThreadState_GET()->c_profilefunc) {  \\
-    PyObject *exc_info = __Pyx_GetExceptionTuple();                                      \\
-    if (exc_info) {                                                                      \\
-        PyThreadState_GET()->c_profilefunc(                                              \\
-            PyThreadState_GET()->c_profileobj, %(FRAME)s, PyTrace_EXCEPTION, exc_info);  \\
-        Py_DECREF(exc_info);                                                             \\
-    }                                                                                    \\
-}
-
-#define __Pyx_TraceReturn(result)                                                  \\
-if (unlikely(__Pyx_use_tracing) && PyThreadState_GET()->use_tracing && PyThreadState_GET()->c_profilefunc) {  \\
-    PyThreadState_GET()->c_profilefunc(                                            \\
-        PyThreadState_GET()->c_profileobj, %(FRAME)s, PyTrace_RETURN, (PyObject*)result);     \\
-    CYTHON_FRAME_DEL;                                                               \\
-}
-
-static PyCodeObject *__Pyx_createFrameCodeObject(const char *funcname, const char *srcfile, int firstlineno); /*proto*/
-static int __Pyx_TraceSetupAndCall(PyCodeObject** code, PyFrameObject** frame, const char *funcname, const char *srcfile, int firstlineno); /*proto*/
-
-#else
-#define __Pyx_TraceCall(funcname, srcfile, firstlineno) 
-#define __Pyx_TraceException() 
-#define __Pyx_TraceReturn(result) 
 #endif /* CYTHON_PROFILE */
 """ 
 % {
