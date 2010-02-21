@@ -1045,20 +1045,17 @@ class NewExprNode(AtomicExprNode):
 
     # C++ new statement
     #
-    # cppclass              string               c++ class to create
-    # template_parameters   None or [ExprNode]   temlate parameters, if any
+    # cppclass              node                 c++ class to create
+    
+    type = None
     
     def infer_type(self, env):
-        entry = env.lookup(self.cppclass)
-        if entry is None or not entry.is_cpp_class:
+        type = self.cppclass.analyse_as_type(env)
+        if type is None or not type.is_cpp_class:
             error(self.pos, "new operator can only be applied to a C++ class")
+            self.type = error_type
             return
         self.cpp_check(env)
-        if self.template_parameters is not None:
-            template_types = [v.analyse_as_type(env) for v in self.template_parameters]
-            type = entry.type.specialize_here(self.pos, template_types)
-        else:
-            type = entry.type
         constructor = type.scope.lookup(u'<init>')
         if constructor is None:
             return_type = PyrexTypes.CFuncType(type, [])
@@ -1071,7 +1068,8 @@ class NewExprNode(AtomicExprNode):
         return self.type
     
     def analyse_types(self, env):
-        self.infer_type(env)
+        if self.type is None:
+            self.infer_type(env)
    
     def generate_result_code(self, code):
         pass
@@ -2599,22 +2597,35 @@ class SimpleCallNode(CallNode):
         return func_type
     
     def analyse_c_function_call(self, env):
+        if self.function.type is error_type:
+            self.type = error_type
+            return
         if self.function.type.is_cpp_class:
-            function = self.function.type.scope.lookup("operator()")
-            if function is None:
+            overloaded_entry = self.function.type.scope.lookup("operator()")
+            if overloaded_entry is None:
                 self.type = PyrexTypes.error_type
                 self.result_code = "<error>"
                 return
+        elif hasattr(self.function, 'entry'):
+            overloaded_entry = self.function.entry
         else:
-            function = self.function.entry
-        entry = PyrexTypes.best_match(self.args, function.all_alternatives(), self.pos)
-        if not entry:
-            self.type = PyrexTypes.error_type
-            self.result_code = "<error>"
-            return
-        self.function.entry = entry
-        self.function.type = entry.type
-        func_type = self.function_type()
+            overloaded_entry = None
+        if overloaded_entry:
+            entry = PyrexTypes.best_match(self.args, overloaded_entry.all_alternatives(), self.pos)
+            if not entry:
+                self.type = PyrexTypes.error_type
+                self.result_code = "<error>"
+                return
+            self.function.entry = entry
+            self.function.type = entry.type
+            func_type = self.function_type()
+        else:
+            func_type = self.function_type()
+            if not func_type.is_cfunction:
+                error(self.pos, "Calling non-function type '%s'" % func_type)
+                self.type = PyrexTypes.error_type
+                self.result_code = "<error>"
+                return
         # Check no. of args
         max_nargs = len(func_type.args)
         expected_nargs = max_nargs - func_type.optional_arg_count
@@ -3051,6 +3062,10 @@ class AttributeNode(ExprNode):
         module_scope = self.obj.analyse_as_module(env)
         if module_scope:
             return module_scope.lookup_type(self.attribute)
+        if not isinstance(self.obj, (UnicodeNode, StringNode, BytesNode)):
+            base_type = self.obj.analyse_as_type(env)
+            if base_type and hasattr(base_type, 'scope'):
+                return base_type.scope.lookup_type(self.attribute)
         return None
     
     def analyse_as_extension_type(self, env):
@@ -4215,8 +4230,7 @@ class UnopNode(ExprNode):
         type = self.operand.type
         if type.is_ptr or type.is_reference:
             type = type.base_type
-        entry = env.lookup(type.name)
-        function = entry.type.scope.lookup("operator%s" % self.operator)
+        function = type.scope.lookup("operator%s" % self.operator)
         if not function:
             error(self.pos, "'%s' operator not defined for %s"
                 % (self.operator, type))

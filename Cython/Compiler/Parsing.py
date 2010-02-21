@@ -325,14 +325,8 @@ def p_new_expr(s):
     # s.systring == 'new'.
     pos = s.position()
     s.next()
-    name = p_ident(s)
-    if s.sy == '[':
-        s.next()
-        template_parameters = p_simple_expr_list(s)
-        s.expect(']')        
-    else:
-        template_parameters = None
-    return p_call(s, ExprNodes.NewExprNode(pos, cppclass = name, template_parameters = template_parameters))
+    cppclass = p_c_base_type(s)
+    return p_call(s, ExprNodes.NewExprNode(pos, cppclass = cppclass))
 
 #trailer: '(' [arglist] ')' | '[' subscriptlist ']' | '.' NAME
 
@@ -1875,11 +1869,15 @@ def p_c_simple_base_type(s, self_flag, nonempty, templates = None):
         complex = complex, longness = longness, 
         is_self_arg = self_flag, templates = templates)
 
-
     if s.sy == '[':
-        return p_buffer_or_template(s, type_node, templates)
-    else:
-        return type_node
+        type_node = p_buffer_or_template(s, type_node, templates)
+    
+    if s.sy == '.':
+        s.next()
+        name = p_ident(s)
+        type_node = Nodes.CNestedBaseTypeNode(pos, base_type = type_node, name = name)
+    
+    return type_node
 
 def p_buffer_or_template(s, base_type_node, templates):
     # s.sy == '['
@@ -2284,7 +2282,7 @@ def p_cdef_extern_block(s, pos, ctx):
         _, include_file = p_string_literal(s)
     if s.systring == "namespace":
         s.next()
-        ctx.namespace = p_dotted_name(s, as_allowed=False)[2].replace('.', '::')
+        ctx.namespace = p_string_literal(s)[1]
     ctx = ctx(cdef_flag = 1, visibility = 'extern')
     if p_nogil(s):
         ctx.nogil = 1
@@ -2735,7 +2733,10 @@ def p_cpp_class_definition(s, pos,  ctx):
         body_ctx = Ctx(visibility = ctx.visibility)
         body_ctx.templates = templates
         while s.sy != 'DEDENT':
-            if s.sy != 'pass':
+            if s.systring == 'cppclass':
+                attributes.append(
+                    p_cpp_class_definition(s, s.position(), body_ctx))
+            elif s.sy != 'pass':
                 attributes.append(
                     p_c_func_or_var_declaration(s, s.position(), body_ctx))
             else:
