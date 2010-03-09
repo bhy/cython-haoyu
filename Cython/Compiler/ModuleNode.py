@@ -271,11 +271,14 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
         code = globalstate['all_the_rest']
 
         self.generate_cached_builtins_decls(env, code)
+        # generate lambda function definitions
+        for node in env.lambda_defs:
+            node.generate_function_definitions(env, code)
+        # generate normal function definitions
         self.body.generate_function_definitions(env, code)
         code.mark_pos(None)
         self.generate_typeobj_definitions(env, code)
         self.generate_method_table(env, code)
-        self.generate_filename_init_prototype(code)
         if env.has_import_star:
             self.generate_import_star(env, code)
         self.generate_pymoduledef_struct(env, code)
@@ -596,7 +599,6 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
         code.putln('static int %s = 0;' % Naming.clineno_cname)
         code.putln('static const char * %s= %s;' % (Naming.cfilenm_cname, Naming.file_c_macro))
         code.putln('static const char *%s;' % Naming.filename_cname)
-        code.putln('static const char **%s;' % Naming.filetable_cname)
 
         # XXX this is a mess
         for utility_code in PyrexTypes.c_int_from_py_function.specialize_list:
@@ -623,13 +625,12 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
     
     def generate_filename_table(self, code):
         code.putln("")
-        code.putln("static const char *%s[] = {" % Naming.filenames_cname)
+        code.putln("static const char *%s[] = {" % Naming.filetable_cname)
         if code.globalstate.filename_list:
             for source_desc in code.globalstate.filename_list:
                 filename = os.path.basename(source_desc.get_filenametable_entry())
                 escaped_filename = filename.replace("\\", "\\\\").replace('"', r'\"')
-                code.putln('"%s",' % 
-                    escaped_filename)
+                code.putln('"%s",' % escaped_filename)
         else:
             # Some C compilers don't like an empty array
             code.putln("0")
@@ -969,7 +970,8 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
                 type.vtabslot_cname,
                 struct_type_cast, type.vtabptr_cname))
         for entry in py_attrs:
-            if entry.name == "__weakref__":
+            if scope.is_internal or entry.name == "__weakref__":
+                # internal classes do not need None inits
                 code.putln("p->%s = 0;" % entry.cname)
             else:
                 code.put_init_var_to_py_none(entry, "p->%s", nanny=False)
@@ -1579,10 +1581,6 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
             code.putln(
                 "};")
 
-    def generate_filename_init_prototype(self, code):
-        code.putln("");
-        code.putln("static void %s(void); /*proto*/" % Naming.fileinit_cname)
-        
     def generate_import_star(self, env, code):
         env.use_utility_code(streq_utility_code)
         code.putln()
@@ -1673,14 +1671,16 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
         code.putln("__pyx_refnanny = __Pyx_RefNanny->SetupContext(\"%s\", __LINE__, __FILE__);"% header3)
         code.putln("#endif")
 
-        self.generate_filename_init_call(code)
-
         code.putln("%s = PyTuple_New(0); %s" % (Naming.empty_tuple, code.error_goto_if_null(Naming.empty_tuple, self.pos)));
         code.putln("#if PY_MAJOR_VERSION < 3");
         code.putln("%s = PyString_FromStringAndSize(\"\", 0); %s" % (Naming.empty_bytes, code.error_goto_if_null(Naming.empty_bytes, self.pos)));
         code.putln("#else");
         code.putln("%s = PyBytes_FromStringAndSize(\"\", 0); %s" % (Naming.empty_bytes, code.error_goto_if_null(Naming.empty_bytes, self.pos)));
         code.putln("#endif");
+        
+        code.putln("#ifdef %s_USED" % Naming.binding_cfunc)
+        code.putln("if (%s_init() < 0) %s" % (Naming.binding_cfunc, code.error_goto(self.pos)))
+        code.putln("#endif")
 
         code.putln("/*--- Library function declarations ---*/")
         env.generate_library_function_declarations(code)
@@ -1813,9 +1813,6 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
     def generate_main_method(self, env, code):
         module_is_main = "%s%s" % (Naming.module_is_main, self.full_module_name.replace('.', '__'))
         code.globalstate.use_utility_code(main_method.specialize(module_name=env.module_name, module_is_main=module_is_main))
-
-    def generate_filename_init_call(self, code):
-        code.putln("%s();" % Naming.fileinit_cname)
 
     def generate_pymoduledef_struct(self, env, code):
         if env.doc:
