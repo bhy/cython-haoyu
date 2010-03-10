@@ -605,8 +605,6 @@ class Scope(object):
     def lookup_operator(self, operator, operands):
         if operands[0].type.is_cpp_class:
             obj_type = operands[0].type
-            if obj_type.is_reference:
-                obj_type = obj_type.base_type
             method = obj_type.scope.lookup("operator%s" % operator)
             if method is not None:
                 res = PyrexTypes.best_match(operands[1:], method.all_alternatives())
@@ -1563,7 +1561,6 @@ class CppClassScope(Scope):
                     error(pos, "no matching function for call to " \
                             "%s::%s()" % (temp_entry.scope.name, temp_entry.scope.name))
         elif not self.default_constructor:
-            print 5
             error(pos, "no matching function for call to %s::%s()" %
                   (self.default_constructor, self.default_constructor))
 
@@ -1610,11 +1607,16 @@ class CppClassScope(Scope):
                                     entry.pos,
                                     entry.cname)
             else:
-                scope.declare_var(entry.name,
-                                    entry.type.specialize(values),
-                                    entry.pos,
-                                    entry.cname,
-                                    entry.visibility)
+#                scope.declare_var(entry.name,
+#                                    entry.type.specialize(values),
+#                                    entry.pos,
+#                                    entry.cname,
+#                                    entry.visibility)
+                for e in entry.all_alternatives():
+                    scope.declare_cfunction(e.name,
+                                            e.type.specialize(values),
+                                            e.pos,
+                                            e.cname)
         return scope
         
         

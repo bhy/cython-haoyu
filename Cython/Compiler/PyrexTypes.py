@@ -1353,42 +1353,39 @@ class CNullPtrType(CPtrType):
     is_null_ptr = 1
     
 
-class CReferenceType(CType):
+class CReferenceType(BaseType):
 
     is_reference = 1
 
     def __init__(self, base_type):
-        self.base_type = base_type
+        self.ref_base_type = base_type
 
     def __repr__(self):
-        return "<CReferenceType %s>" % repr(self.base_type)
-
-    def same_as_resolved_type(self, other_type):
-        return other_type.is_reference and self.base_type.same_as(other_type.base_type)
+        return "<CReferenceType %s>" % repr(self.ref_base_type)
     
+    def __str__(self):
+        return "%s &" % self.ref_base_type
+
+    def as_argument_type(self):
+        return self
+
     def declaration_code(self, entity_code, 
             for_display = 0, dll_linkage = None, pyrex = 0):
         #print "CReferenceType.declaration_code: pointer to", self.base_type ###
-        return self.base_type.declaration_code(
+        return self.ref_base_type.declaration_code(
             "&%s" % entity_code,
             for_display, dll_linkage, pyrex)
     
-    def assignable_from_resolved_type(self, other_type):
-        if other_type is error_type:
-            return 1
-        elif other_type.is_reference and self.base_type == other_type.base_type:
-            return 1
-        elif other_type == self.base_type:
-            return 1
-        else: #for now
-            return 0
-        
     def specialize(self, values):
-        base_type = self.base_type.specialize(values)
-        if base_type == self.base_type:
+        base_type = self.ref_base_type.specialize(values)
+        if base_type == self.ref_base_type:
             return self
         else:
             return CReferenceType(base_type)
+
+    def __getattr__(self, name):
+        return getattr(self.ref_base_type, name)
+
 
 class CFuncType(CType):
     #  return_type      CType
@@ -2304,9 +2301,7 @@ def best_match(args, functions, pos=None):
             src_type = args[i].type
             dst_type = func_type.args[i].type
             if dst_type.assignable_from(src_type):
-                if src_type == dst_type or (dst_type.is_reference and \
-                                            src_type == dst_type.base_type) \
-                                        or dst_type.same_as(src_type):
+                if src_type == dst_type or dst_type.same_as(src_type):
                     pass # score 0
                 elif is_promotion(src_type, dst_type):
                     score[2] += 1
