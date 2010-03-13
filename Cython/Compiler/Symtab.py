@@ -362,7 +362,7 @@ class Scope(object):
             type = PyrexTypes.create_typedef_type(name, base_type, cname, 
                                                   (visibility == 'extern'))
         except ValueError, e:
-            error(pos, e.message)
+            error(pos, e.args[0])
             type = PyrexTypes.error_type
         entry = self.declare_type(name, type, pos, cname, visibility)
         type.qualified_name = entry.qualified_name
@@ -423,8 +423,6 @@ class Scope(object):
                 if scope:
                     entry.type.scope = scope
                     self.type_entries.append(entry)
-        if not scope and not entry.type.scope:
-            entry.type.scope = CppClassScope(name, self)
         if templates is not None:
             for T in templates:
                 template_entry = entry.type.scope.declare(T.name, T.name, T, None, 'extern')
@@ -1245,10 +1243,10 @@ class StructOrUnionScope(Scope):
         self.var_entries.append(entry)
         if type.is_pyobject and not allow_pyobject:
             error(pos,
-                "C struct/union member cannot be a Python object")
+                  "C struct/union member cannot be a Python object")
         if visibility != 'private':
             error(pos,
-                "C struct/union member cannot be declared %s" % visibility)
+                  "C struct/union member cannot be declared %s" % visibility)
         return entry
 
     def declare_cfunction(self, name, type, pos, 
@@ -1434,7 +1432,7 @@ class CClassScope(ClassScope):
         args = type.args
         if not args:
             error(pos, "C method has no self argument")
-        elif not args[0].type.same_as(self.parent_type):
+        elif not self.parent_type.assignable_from(args[0].type):
             error(pos, "Self argument (%s) of C method '%s' does not match parent type (%s)" %
                   (args[0].type, name, self.parent_type))
         entry = self.lookup_here(name)
