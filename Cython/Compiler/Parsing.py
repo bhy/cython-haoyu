@@ -89,7 +89,12 @@ def p_binop_expr(s, ops, p_sub_expr):
 
 #expression: or_test [if or_test else test] | lambda_form
 
+# actually:
+#test: or_test ['if' or_test 'else' test] | lambdef
+
 def p_simple_expr(s):
+    if s.sy == 'lambda':
+        return p_lambdef(s)
     pos = s.position()
     expr = p_or_test(s)
     if s.sy == 'if':
@@ -100,11 +105,46 @@ def p_simple_expr(s):
         return ExprNodes.CondExprNode(pos, test=test, true_val=expr, false_val=other)
     else:
         return expr
-        
-#test: or_test | lambda_form
-        
+
+#lambdef: 'lambda' [varargslist] ':' test
+
+def p_lambdef(s, allow_conditional=True):
+    # s.sy == 'lambda'
+    pos = s.position()
+    s.next()
+    if s.sy == ':':
+        args = []
+        star_arg = starstar_arg = None
+    else:
+        args, star_arg, starstar_arg = p_varargslist(
+            s, terminator=':', annotated=False)
+    s.expect(':')
+    if allow_conditional:
+        expr = p_simple_expr(s)
+    else:
+        expr = p_test_nocond(s)
+    return ExprNodes.LambdaNode(
+        pos, args = args,
+        star_arg = star_arg, starstar_arg = starstar_arg,
+        result_expr = expr)
+
+#lambdef_nocond: 'lambda' [varargslist] ':' test_nocond
+
+def p_lambdef_nocond(s):
+    return p_lambdef(s, allow_conditional=False)
+
+#test: or_test | lambdef
+
 def p_test(s):
     return p_or_test(s)
+
+#test_nocond: or_test | lambdef_nocond
+
+def p_test_nocond(s):
+    if s.sy == 'lambda':
+        return p_lambdef_nocond(s)
+    else:
+        return p_or_test(s)
 
 #or_test: and_test ('or' and_test)*
 
@@ -293,10 +333,16 @@ def p_yield_expression(s):
     # s.sy == "yield"
     pos = s.position()
     s.next()
-    if s.sy not in ('EOF', 'NEWLINE', ')'):
-        expr = p_expr(s)
-    s.error("generators ('yield') are not currently supported")
-    return Nodes.PassStatNode(pos)
+    if s.sy != ')' and s.sy not in statement_terminators:
+        arg = p_expr(s)
+    else:
+        arg = None
+    return ExprNodes.YieldExprNode(pos, arg=arg)
+
+def p_yield_statement(s):
+    # s.sy == "yield"
+    yield_expr = p_yield_expression(s)
+    return Nodes.ExprStatNode(yield_expr.pos, expr=yield_expr)
 
 #power: atom trailer* ('**' factor)*
 
@@ -713,10 +759,10 @@ def p_string_literal(s, kind_override=None):
     return kind, value
 
 # list_display      ::=      "[" [listmaker] "]"
-# listmaker     ::=     expression ( list_for | ( "," expression )* [","] )
-# list_iter     ::=     list_for | list_if
-# list_for     ::=     "for" expression_list "in" testlist [list_iter]
-# list_if     ::=     "if" test [list_iter]
+# listmaker     ::=     expression ( comp_for | ( "," expression )* [","] )
+# comp_iter     ::=     comp_for | comp_if
+# comp_for     ::=     "for" expression_list "in" testlist [comp_iter]
+# comp_if     ::=     "if" test [comp_iter]
         
 def p_list_maker(s):
     # s.sy == '['
@@ -730,7 +776,7 @@ def p_list_maker(s):
         target = ExprNodes.ListNode(pos, args = [])
         append = ExprNodes.ComprehensionAppendNode(
             pos, expr=expr, target=ExprNodes.CloneNode(target))
-        loop = p_list_for(s, Nodes.ExprStatNode(append.pos, expr=append))
+        loop = p_comp_for(s, Nodes.ExprStatNode(append.pos, expr=append))
         s.expect(']')
         return ExprNodes.ComprehensionNode(
             pos, loop=loop, append=append, target=target)
@@ -742,32 +788,32 @@ def p_list_maker(s):
         s.expect(']')
         return ExprNodes.ListNode(pos, args = exprs)
         
-def p_list_iter(s, body):
+def p_comp_iter(s, body):
     if s.sy == 'for':
-        return p_list_for(s, body)
+        return p_comp_for(s, body)
     elif s.sy == 'if':
-        return p_list_if(s, body)
+        return p_comp_if(s, body)
     else:
         # insert the 'append' operation into the loop
         return body
 
-def p_list_for(s, body):
+def p_comp_for(s, body):
     # s.sy == 'for'
     pos = s.position()
     s.next()
     kw = p_for_bounds(s)
     kw['else_clause'] = None
-    kw['body'] = p_list_iter(s, body)
+    kw['body'] = p_comp_iter(s, body)
     return Nodes.ForStatNode(pos, **kw)
         
-def p_list_if(s, body):
+def p_comp_if(s, body):
     # s.sy == 'if'
     pos = s.position()
     s.next()
-    test = p_test(s)
+    test = p_test_nocond(s)
     return Nodes.IfStatNode(pos, 
         if_clauses = [Nodes.IfClauseNode(pos, condition = test,
-                                         body = p_list_iter(s, body))],
+                                         body = p_comp_iter(s, body))],
         else_clause = None )
 
 #dictmaker: test ':' test (',' test ':' test)* [',']
@@ -795,7 +841,7 @@ def p_dict_or_set_maker(s):
         target = ExprNodes.SetNode(pos, args=[])
         append = ExprNodes.ComprehensionAppendNode(
             item.pos, expr=item, target=ExprNodes.CloneNode(target))
-        loop = p_list_for(s, Nodes.ExprStatNode(append.pos, expr=append))
+        loop = p_comp_for(s, Nodes.ExprStatNode(append.pos, expr=append))
         s.expect('}')
         return ExprNodes.ComprehensionNode(
             pos, loop=loop, append=append, target=target)
@@ -810,7 +856,7 @@ def p_dict_or_set_maker(s):
             append = ExprNodes.DictComprehensionAppendNode(
                 item.pos, key_expr=key, value_expr=value,
                 target=ExprNodes.CloneNode(target))
-            loop = p_list_for(s, Nodes.ExprStatNode(append.pos, expr=append))
+            loop = p_comp_for(s, Nodes.ExprStatNode(append.pos, expr=append))
             s.expect('}')
             return ExprNodes.ComprehensionNode(
                 pos, loop=loop, append=append, target=target)
@@ -1076,6 +1122,8 @@ def p_from_import_statement(s, first_statement = 0):
         imported_names = [p_imported_name(s, is_cimport)]
     while s.sy == ',':
         s.next()
+        if is_parenthesized and s.sy == ')':
+            break
         imported_names.append(p_imported_name(s, is_cimport))
     if is_parenthesized:
         s.expect(')')
@@ -1325,7 +1373,7 @@ def p_except_clause(s):
     exc_value = None
     if s.sy != ':':
         exc_type = p_simple_expr(s)
-        if s.sy == ',':
+        if s.sy == ',' or (s.sy == 'IDENT' and s.systring == 'as'):
             s.next()
             exc_value = p_simple_expr(s)
         elif s.sy == 'IDENT' and s.systring == 'as':
@@ -1429,7 +1477,7 @@ def p_simple_statement(s, first_statement = 0):
     elif s.sy == 'from':
         node = p_from_import_statement(s, first_statement = first_statement)
     elif s.sy == 'yield':
-        node = p_yield_expression(s)
+        node = p_yield_statement(s)
     elif s.sy == 'assert':
         node = p_assert_statement(s)
     elif s.sy == 'pass':
@@ -1515,7 +1563,7 @@ def p_statement(s, ctx, first_statement = 0):
     elif s.sy == 'IF':
         return p_IF_statement(s, ctx)
     elif s.sy == 'DECORATOR':
-        if ctx.level not in ('module', 'class', 'c_class', 'property', 'module_pxd', 'c_class_pxd'):
+        if ctx.level not in ('module', 'class', 'c_class', 'function', 'property', 'module_pxd', 'c_class_pxd'):
             print ctx.level
             s.error('decorator not allowed here')
         s.level = ctx.level
@@ -1548,7 +1596,9 @@ def p_statement(s, ctx, first_statement = 0):
         if ctx.api:
             error(s.pos, "'api' not allowed with this statement")
         elif s.sy == 'def':
-            if ctx.level not in ('module', 'class', 'c_class', 'c_class_pxd', 'property'):
+            # def statements aren't allowed in pxd files, except
+            # as part of a cdef class
+            if ('pxd' in ctx.level) and (ctx.level != 'c_class_pxd'):
                 s.error('def statement not allowed here')
             s.level = ctx.level
             return p_def_statement(s, decorators)
@@ -2060,14 +2110,15 @@ def p_exception_value_clause(s):
 c_arg_list_terminators = ('*', '**', '.', ')')
 
 def p_c_arg_list(s, ctx = Ctx(), in_pyfunc = 0, cmethod_flag = 0,
-                 nonempty_declarators = 0, kw_only = 0):
+                 nonempty_declarators = 0, kw_only = 0, annotated = 1):
     #  Comma-separated list of C argument declarations, possibly empty.
     #  May have a trailing comma.
     args = []
     is_self_arg = cmethod_flag
     while s.sy not in c_arg_list_terminators:
         args.append(p_c_arg_decl(s, ctx, in_pyfunc, is_self_arg,
-            nonempty = nonempty_declarators, kw_only = kw_only))
+            nonempty = nonempty_declarators, kw_only = kw_only,
+            annotated = annotated))
         if s.sy != ',':
             break
         s.next()
@@ -2081,10 +2132,12 @@ def p_optional_ellipsis(s):
     else:
         return 0
 
-def p_c_arg_decl(s, ctx, in_pyfunc, cmethod_flag = 0, nonempty = 0, kw_only = 0):
+def p_c_arg_decl(s, ctx, in_pyfunc, cmethod_flag = 0, nonempty = 0,
+                 kw_only = 0, annotated = 1):
     pos = s.position()
     not_none = or_none = 0
     default = None
+    annotation = None
     if s.in_python_file:
         # empty type declaration
         base_type = Nodes.CSimpleBaseTypeNode(pos,
@@ -2106,6 +2159,9 @@ def p_c_arg_decl(s, ctx, in_pyfunc, cmethod_flag = 0, nonempty = 0, kw_only = 0)
             error(pos, "'%s None' only allowed in Python functions" % kind)
         or_none = kind == 'or'
         not_none = kind == 'not'
+    if annotated and s.sy == ':':
+        s.next()
+        annotation = p_simple_expr(s)
     if s.sy == '=':
         s.next()
         if 'pxd' in s.level:
@@ -2121,6 +2177,7 @@ def p_c_arg_decl(s, ctx, in_pyfunc, cmethod_flag = 0, nonempty = 0, kw_only = 0)
         not_none = not_none,
         or_none = or_none,
         default = default,
+        annotation = annotation,
         kw_only = kw_only)
 
 def p_api(s):
@@ -2393,9 +2450,24 @@ def p_def_statement(s, decorators=None):
     pos = s.position()
     s.next()
     name = EncodedString( p_ident(s) )
-    #args = []
     s.expect('(');
-    args = p_c_arg_list(s, in_pyfunc = 1, nonempty_declarators = 1)
+    args, star_arg, starstar_arg = p_varargslist(s, terminator=')')
+    s.expect(')')
+    if p_nogil(s):
+        error(s.pos, "Python function cannot be declared nogil")
+    return_type_annotation = None
+    if s.sy == '->':
+        s.next()
+        return_type_annotation = p_simple_expr(s)
+    doc, body = p_suite(s, Ctx(level = 'function'), with_doc = 1)
+    return Nodes.DefNode(pos, name = name, args = args, 
+        star_arg = star_arg, starstar_arg = starstar_arg,
+        doc = doc, body = body, decorators = decorators,
+        return_type_annotation = return_type_annotation)
+
+def p_varargslist(s, terminator=')', annotated=1):
+    args = p_c_arg_list(s, in_pyfunc = 1, nonempty_declarators = 1,
+                        annotated = annotated)
     star_arg = None
     starstar_arg = None
     if s.sy == '*':
@@ -2406,23 +2478,21 @@ def p_def_statement(s, decorators=None):
             s.next()
             args.extend(p_c_arg_list(s, in_pyfunc = 1,
                 nonempty_declarators = 1, kw_only = 1))
-        elif s.sy != ')':
+        elif s.sy != terminator:
             s.error("Syntax error in Python function argument list")
     if s.sy == '**':
         s.next()
         starstar_arg = p_py_arg_decl(s)
-    s.expect(')')
-    if p_nogil(s):
-        error(s.pos, "Python function cannot be declared nogil")
-    doc, body = p_suite(s, Ctx(level = 'function'), with_doc = 1)
-    return Nodes.DefNode(pos, name = name, args = args, 
-        star_arg = star_arg, starstar_arg = starstar_arg,
-        doc = doc, body = body, decorators = decorators)
+    return (args, star_arg, starstar_arg)
 
 def p_py_arg_decl(s):
     pos = s.position()
     name = p_ident(s)
-    return Nodes.PyArgDeclNode(pos, name = name)
+    annotation = None
+    if s.sy == ':':
+        s.next()
+        annotation = p_simple_expr(s)
+    return Nodes.PyArgDeclNode(pos, name = name, annotation = annotation)
 
 def p_class_statement(s, decorators):
     # s.sy == 'class'
@@ -2669,6 +2739,7 @@ def p_cpp_class_definition(s, pos,  ctx):
 #----------------------------------------------
 
 def print_parse_tree(f, node, level, key = None):
+    from types import ListType, TupleType
     from Nodes import Node
     ind = "  " * level
     if node:
