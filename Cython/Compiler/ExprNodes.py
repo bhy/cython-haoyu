@@ -12,13 +12,15 @@ import Naming
 import Nodes
 from Nodes import Node
 import PyrexTypes
-from PyrexTypes import py_object_type, c_long_type, typecast, error_type, unspecified_type
+from PyrexTypes import py_object_type, c_long_type, typecast, error_type, \
+     unspecified_type
 from Builtin import list_type, tuple_type, set_type, dict_type, \
      unicode_type, str_type, bytes_type, type_type
 import Builtin
 import Symtab
 import Options
 from Annotate import AnnotationItem
+from Cython import Utils
 
 from Cython.Debugging import print_call_chain
 from DebugFlags import debug_disposal_code, debug_temp_alloc, \
@@ -518,6 +520,9 @@ class ExprNode(Node):
         for sub in self.subexpr_nodes():
             sub.free_temps(code)
 
+    def generate_function_definitions(self, env, code):
+        pass
+
     # ---------------- Annotation ---------------------
     
     def annotate(self, code):
@@ -817,16 +822,23 @@ class IntNode(ConstNode):
             self.result_code = self.get_constant_c_result_code()
     
     def get_constant_c_result_code(self):
-        return str(self.value) + self.unsigned + self.longness
+        value = self.value
+        if isinstance(value, basestring) and len(value) > 2:
+            # must convert C-incompatible Py3 oct/bin notations
+            if value[1] in 'oO':
+                value = value[0] + value[2:] # '0o123' => '0123'
+            elif value[1] in 'bB':
+                value = int(value[2:], 2)
+        return str(value) + self.unsigned + self.longness
 
     def calculate_result_code(self):
         return self.result_code
 
     def calculate_constant_result(self):
-        self.constant_result = int(self.value, 0)
+        self.constant_result = Utils.str_to_number(self.value)
 
     def compile_time_value(self, denv):
-        return int(self.value, 0)
+        return Utils.str_to_number(self.value)
 
 
 class FloatNode(ConstNode):
@@ -1027,10 +1039,10 @@ class LongNode(AtomicExprNode):
     type = py_object_type
 
     def calculate_constant_result(self):
-        self.constant_result = long(self.value)
+        self.constant_result = Utils.str_to_number(self.value)
     
     def compile_time_value(self, denv):
-        return long(self.value)
+        return Utils.str_to_number(self.value)
     
     def analyse_types(self, env):
         self.is_temp = 1
@@ -1260,7 +1272,7 @@ class NameNode(AtomicExprNode):
             else:
                 type = py_object_type
             self.entry = env.declare_var(self.name, type, self.pos)
-        env.control_flow.set_state(self.pos, (self.name, 'initalized'), True)
+        env.control_flow.set_state(self.pos, (self.name, 'initialized'), True)
         env.control_flow.set_state(self.pos, (self.name, 'source'), 'assignment')
         if self.entry.is_declared_generic:
             self.result_ctype = py_object_type
@@ -1405,13 +1417,13 @@ class NameNode(AtomicExprNode):
             
         elif entry.is_local and False:
             # control flow not good enough yet
-            assigned = entry.scope.control_flow.get_state((entry.name, 'initalized'), self.pos)
+            assigned = entry.scope.control_flow.get_state((entry.name, 'initialized'), self.pos)
             if assigned is False:
                 error(self.pos, "local variable '%s' referenced before assignment" % entry.name)
             elif not Options.init_local_none and assigned is None:
                 code.putln('if (%s == 0) { PyErr_SetString(PyExc_UnboundLocalError, "%s"); %s }' %
                            (entry.cname, entry.name, code.error_goto(self.pos)))
-                entry.scope.control_flow.set_state(self.pos, (entry.name, 'initalized'), True)
+                entry.scope.control_flow.set_state(self.pos, (entry.name, 'initialized'), True)
 
     def generate_assignment_code(self, rhs, code):
         #print "NameNode.generate_assignment_code:", self.name ###
@@ -1473,19 +1485,20 @@ class NameNode(AtomicExprNode):
                     rhs.make_owned_reference(code)
                     if entry.is_cglobal:
                         code.put_gotref(self.py_result())
-                if self.use_managed_ref and not self.lhs_of_first_assignment:
-                    if entry.is_local and not Options.init_local_none:
-                        initalized = entry.scope.control_flow.get_state((entry.name, 'initalized'), self.pos)
-                        if initalized is True:
+                    if not self.lhs_of_first_assignment:
+                        if entry.is_local and not Options.init_local_none:
+                            initialized = entry.scope.control_flow.get_state((entry.name, 'initialized'), self.pos)
+                            if initialized is True:
+                                code.put_decref(self.result(), self.ctype())
+                            elif initialized is None:
+                                code.put_xdecref(self.result(), self.ctype())
+                        else:
                             code.put_decref(self.result(), self.ctype())
-                        elif initalized is None:
-                            code.put_xdecref(self.result(), self.ctype())
-                    else:
-                        code.put_decref(self.result(), self.ctype())
-                if self.use_managed_ref:
                     if entry.is_cglobal:
                         code.put_giveref(rhs.py_result())
-            code.putln('%s = %s;' % (self.result(), rhs.result_as(self.ctype())))
+
+            code.putln('%s = %s;' % (self.result(),
+                                     rhs.result_as(self.ctype())))
             if debug_disposal_code:
                 print("NameNode.generate_assignment_code:")
                 print("...generating post-assignment code for %s" % rhs)
@@ -4164,6 +4177,32 @@ class ClassNode(ExprNode):
                 code.error_goto_if_null(self.result(), self.pos)))
         code.put_gotref(self.py_result())
 
+class BoundMethodNode(ExprNode):
+    #  Helper class used in the implementation of Python
+    #  class definitions. Constructs an bound method
+    #  object from a class and a function.
+    #
+    #  function      ExprNode   Function object
+    #  self_object   ExprNode   self object
+    
+    subexprs = ['function']
+    
+    def analyse_types(self, env):
+        self.function.analyse_types(env)
+        self.type = py_object_type
+        self.is_temp = 1
+
+    gil_message = "Constructing an bound method"
+
+    def generate_result_code(self, code):
+        code.putln(
+            "%s = PyMethod_New(%s, %s, (PyObject*)%s->ob_type); %s" % (
+                self.result(),
+                self.function.py_result(),
+                self.self_object.py_result(),
+                self.self_object.py_result(),
+                code.error_goto_if_null(self.result(), self.pos)))
+        code.put_gotref(self.py_result())
 
 class UnboundMethodNode(ExprNode):
     #  Helper class used in the implementation of Python
@@ -4196,31 +4235,106 @@ class UnboundMethodNode(ExprNode):
         code.put_gotref(self.py_result())
 
 
-class PyCFunctionNode(AtomicExprNode):
+class PyCFunctionNode(ExprNode):
     #  Helper class used in the implementation of Python
     #  class definitions. Constructs a PyCFunction object
     #  from a PyMethodDef struct.
     #
     #  pymethdef_cname   string   PyMethodDef structure
+    #  self_object       ExprNode or None
+    #  binding           bool
+
+    subexprs = []
+    self_object = None
+    binding = False
     
     type = py_object_type
     is_temp = 1
     
     def analyse_types(self, env):
-        pass
+        if self.binding:
+            env.use_utility_code(binding_cfunc_utility_code)
 
     def may_be_none(self):
         return False
     
     gil_message = "Constructing Python function"
 
+    def self_result_code(self):
+        if self.self_object is None:
+            self_result = "NULL"
+        else:
+            self_result = self.self_object.py_result()
+        return self_result
+
     def generate_result_code(self, code):
+        if self.binding:
+            constructor = "%s_New" % Naming.binding_cfunc
+        else:
+            constructor = "PyCFunction_New"
         code.putln(
-            "%s = PyCFunction_New(&%s, 0); %s" % (
+            "%s = %s(&%s, %s); %s" % (
                 self.result(),
+                constructor,
                 self.pymethdef_cname,
+                self.self_result_code(),
                 code.error_goto_if_null(self.result(), self.pos)))
         code.put_gotref(self.py_result())
+
+class InnerFunctionNode(PyCFunctionNode):
+    # Special PyCFunctionNode that depends on a closure class
+    #
+    binding = True
+    
+    def self_result_code(self):
+        return "((PyObject*)%s)" % Naming.cur_scope_cname
+
+class LambdaNode(InnerFunctionNode):
+    # Lambda expression node (only used as a function reference)
+    #
+    # args          [CArgDeclNode]         formal arguments
+    # star_arg      PyArgDeclNode or None  * argument
+    # starstar_arg  PyArgDeclNode or None  ** argument
+    # lambda_name   string                 a module-globally unique lambda name
+    # result_expr   ExprNode
+    # def_node      DefNode                the underlying function 'def' node
+
+    child_attrs = ['def_node']
+
+    def_node = None
+    name = StringEncoding.EncodedString('<lambda>')
+
+    def analyse_declarations(self, env):
+        #self.def_node.needs_closure = self.needs_closure
+        self.def_node.analyse_declarations(env)
+        self.pymethdef_cname = self.def_node.entry.pymethdef_cname
+        env.add_lambda_def(self.def_node)
+
+class YieldExprNode(ExprNode):
+    # Yield expression node
+    #
+    # arg         ExprNode   the value to return from the generator
+    # label_name  string     name of the C label used for this yield
+
+    subexprs = []
+    type = py_object_type
+
+    def analyse_types(self, env):
+        self.is_temp = 1
+        if self.arg is not None:
+            self.arg.analyse_types(env)
+            if not self.arg.type.is_pyobject:
+                self.arg = self.arg.coerce_to_pyobject(env)
+
+    def generate_result_code(self, code):
+        self.label_name = code.new_label('resume_from_yield')
+        code.use_label(self.label_name)
+        code.putln("/* FIXME: save temporary variables */")
+        code.putln("/* FIXME: return from function, yielding value */")
+        code.put_label(self.label_name)
+        code.putln("/* FIXME: restore temporary variables and  */")
+        code.putln("/* FIXME: extract sent value from closure */")
+
 
 #-------------------------------------------------------------------
 #
@@ -7058,3 +7172,62 @@ proto="""
 #define UNARY_NEG_WOULD_OVERFLOW(x)	\
 	(((x) < 0) & ((unsigned long)(x) == 0-(unsigned long)(x)))
 """)
+
+
+binding_cfunc_utility_code = UtilityCode(
+proto="""
+#define %(binding_cfunc)s_USED 1
+
+typedef struct {
+    PyCFunctionObject func;
+} %(binding_cfunc)s_object;
+
+PyTypeObject %(binding_cfunc)s_type;
+PyTypeObject *%(binding_cfunc)s = NULL;
+
+PyObject *%(binding_cfunc)s_NewEx(PyMethodDef *ml, PyObject *self, PyObject *module); /* proto */
+#define %(binding_cfunc)s_New(ml, self) %(binding_cfunc)s_NewEx(ml, self, NULL)
+
+int %(binding_cfunc)s_init(void); /* proto */
+""" % Naming.__dict__,
+impl="""
+
+PyObject *%(binding_cfunc)s_NewEx(PyMethodDef *ml, PyObject *self, PyObject *module) {
+	%(binding_cfunc)s_object *op = PyObject_GC_New(%(binding_cfunc)s_object, %(binding_cfunc)s);
+    if (op == NULL)
+        return NULL;
+	op->func.m_ml = ml;
+	Py_XINCREF(self);
+	op->func.m_self = self;
+	Py_XINCREF(module);
+	op->func.m_module = module;
+	_PyObject_GC_TRACK(op);
+	return (PyObject *)op;
+}
+
+static void %(binding_cfunc)s_dealloc(%(binding_cfunc)s_object *m) {
+	_PyObject_GC_UNTRACK(m);
+	Py_XDECREF(m->func.m_self);
+	Py_XDECREF(m->func.m_module);
+    PyObject_GC_Del(m);
+}
+
+static PyObject *%(binding_cfunc)s_descr_get(PyObject *func, PyObject *obj, PyObject *type) {
+	if (obj == Py_None)
+		obj = NULL;
+	return PyMethod_New(func, obj, type);
+}
+
+int %(binding_cfunc)s_init(void) {
+    %(binding_cfunc)s_type = PyCFunction_Type;
+    %(binding_cfunc)s_type.tp_name = "cython_binding_builtin_function_or_method";
+    %(binding_cfunc)s_type.tp_dealloc = (destructor)%(binding_cfunc)s_dealloc;
+    %(binding_cfunc)s_type.tp_descr_get = %(binding_cfunc)s_descr_get;
+    if (PyType_Ready(&%(binding_cfunc)s_type) < 0) {
+        return -1;
+    }
+    %(binding_cfunc)s = &%(binding_cfunc)s_type;
+    return 0;
+
+}
+""" % Naming.__dict__)
