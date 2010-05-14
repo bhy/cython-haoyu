@@ -4207,7 +4207,7 @@ class ClassNode(ExprNode):
         if self.doc:
             self.doc.analyse_types(env)
             self.doc = self.doc.coerce_to_pyobject(env)
-        self.module_name = env.global_scope().qualified_name
+        self.module_name = env.global_scope().module_name
         self.type = py_object_type
         self.is_temp = 1
         env.use_utility_code(create_class_utility_code);
@@ -4224,13 +4224,15 @@ class ClassNode(ExprNode):
                 'PyDict_SetItemString(%s, "__doc__", %s)' % (
                     self.dict.py_result(),
                     self.doc.py_result()))
+        py_mod_name = code.globalstate.get_py_string_const(
+                 self.module_name, identifier=True)
         code.putln(
-            '%s = __Pyx_CreateClass(%s, %s, %s, "%s"); %s' % (
+            '%s = __Pyx_CreateClass(%s, %s, %s, %s); %s' % (
                 self.result(),
                 self.bases.py_result(),
                 self.dict.py_result(),
                 cname,
-                self.module_name,
+                py_mod_name.cname,
                 code.error_goto_if_null(self.result(), self.pos)))
         code.put_gotref(self.py_result())
 
@@ -4300,6 +4302,7 @@ class PyCFunctionNode(ExprNode):
     #  pymethdef_cname   string   PyMethodDef structure
     #  self_object       ExprNode or None
     #  binding           bool
+    #  module_name       str
 
     subexprs = []
     self_object = None
@@ -4311,6 +4314,7 @@ class PyCFunctionNode(ExprNode):
     def analyse_types(self, env):
         if self.binding:
             env.use_utility_code(binding_cfunc_utility_code)
+        self.module_name = env.global_scope().module_name
 
     def may_be_none(self):
         return False
@@ -4326,15 +4330,18 @@ class PyCFunctionNode(ExprNode):
 
     def generate_result_code(self, code):
         if self.binding:
-            constructor = "%s_New" % Naming.binding_cfunc
+            constructor = "%s_NewEx" % Naming.binding_cfunc
         else:
-            constructor = "PyCFunction_New"
+            constructor = "PyCFunction_NewEx"
+        py_mod_name = code.globalstate.get_py_string_const(
+                 self.module_name, identifier=True)
         code.putln(
-            "%s = %s(&%s, %s); %s" % (
+            '%s = %s(&%s, %s, %s); %s' % (
                 self.result(),
                 constructor,
                 self.pymethdef_cname,
                 self.self_result_code(),
+                py_mod_name.cname,
                 code.error_goto_if_null(self.result(), self.pos)))
         code.put_gotref(self.py_result())
 
@@ -6790,23 +6797,15 @@ static CYTHON_INLINE int __Pyx_TypeTest(PyObject *obj, PyTypeObject *type) {
 
 create_class_utility_code = UtilityCode(
 proto = """
-static PyObject *__Pyx_CreateClass(PyObject *bases, PyObject *dict, PyObject *name, const char *modname); /*proto*/
+static PyObject *__Pyx_CreateClass(PyObject *bases, PyObject *dict, PyObject *name, PyObject *modname); /*proto*/
 """,
 impl = """
 static PyObject *__Pyx_CreateClass(
-    PyObject *bases, PyObject *dict, PyObject *name, const char *modname)
+    PyObject *bases, PyObject *dict, PyObject *name, PyObject *modname)
 {
-    PyObject *py_modname;
     PyObject *result = 0;
 
-    #if PY_MAJOR_VERSION < 3
-    py_modname = PyString_FromString(modname);
-    #else
-    py_modname = PyUnicode_FromString(modname);
-    #endif
-    if (!py_modname)
-        goto bad;
-    if (PyDict_SetItemString(dict, "__module__", py_modname) < 0)
+    if (PyDict_SetItemString(dict, "__module__", modname) < 0)
         goto bad;
     #if PY_MAJOR_VERSION < 3
     result = PyClass_New(bases, dict, name);
@@ -6814,7 +6813,6 @@ static PyObject *__Pyx_CreateClass(
     result = PyObject_CallFunctionObjArgs((PyObject *)&PyType_Type, name, bases, dict, NULL);
     #endif
 bad:
-    Py_XDECREF(py_modname);
     return result;
 }
 """)
