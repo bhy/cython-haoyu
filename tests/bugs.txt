@@ -11,6 +11,7 @@ cascaded_list_unpacking_T467
 compile.cpp_operators
 cpp_templated_ctypedef
 cpp_structs
+genexpr_T491
 
 # CPython regression tests that don't current work:
 pyregr.test_threadsignals
