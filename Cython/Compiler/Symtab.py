@@ -1221,7 +1221,8 @@ class LocalScope(Scope):
             warning(pos, "'%s' redeclared  ", 0)
         else:
             entry = self.lookup(name)
-            self.entries[name] = entry
+            if entry is None or not entry.from_closure:
+                error(pos, "no binding for nonlocal '%s' found" % name)
         
     def lookup(self, name):
         # Look up name in this scope or an enclosing one.
