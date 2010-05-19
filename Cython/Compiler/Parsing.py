@@ -1512,7 +1512,7 @@ def p_simple_statement(s, first_statement = 0):
     #print "p_simple_statement:", s.sy, s.systring ###
     if s.sy == 'global':
         node = p_global_statement(s)
-    if s.sy == 'nonlocal':
+    elif s.sy == 'nonlocal':
         node = p_nonlocal_statement(s)
     elif s.sy == 'print':
         node = p_print_statement(s)
