@@ -16,9 +16,8 @@ def testNonlocal1():
 
 def testNonlocal2():
     """
-    >>> testNonlocal1() 
+    >>> testNonlocal2() 
     1
-    2
     """
     # 'nonlocal' NAME (',' NAME)*
     x = 0
@@ -27,3 +26,18 @@ def testNonlocal2():
         x=1
         print(x)
     f()
+
+def testNonlocal3():
+    """
+    >>> testNonlocal3() 
+    1
+    """
+    # 'nonlocal' NAME (',' NAME)*
+    x = 0
+    def f():
+        def g():
+            nonlocal x
+            x=1
+            print(x)
+        return g
+    f()()
