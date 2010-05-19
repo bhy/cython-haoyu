@@ -1314,10 +1314,16 @@ class FuncDefNode(StatNode, BlockNode):
             if entry.type.is_pyobject:
                 if entry.assignments and not entry.in_closure:
                     code.put_var_incref(entry)
+
         # ----- Initialise local variables 
+        #code.put('/* %s */'%(lenv.var_entries))
         for entry in lenv.var_entries:
             if entry.type.is_pyobject and entry.init_to_none and entry.used:
                 code.put_init_var_to_py_none(entry)
+        for entry in lenv.entries.values():
+            if entry.from_closure:
+                code.put_gotref(entry.cname)
+
         # ----- Initialise local buffer auxiliary variables
         for entry in lenv.var_entries + lenv.arg_entries:
             if entry.type.is_buffer and entry.buffer_aux.buffer_info_var.used:
@@ -1417,6 +1423,10 @@ class FuncDefNode(StatNode, BlockNode):
                     code.put_var_decref(entry)
                 elif entry.in_closure and self.needs_closure:
                     code.put_giveref(entry.cname)
+        for entry in lenv.entries.values():
+            if entry.from_closure:
+                code.put_giveref(entry.cname)
+
         # Decref any increfed args
         for entry in lenv.arg_entries:
             if entry.type.is_pyobject:
