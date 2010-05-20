@@ -1312,17 +1312,17 @@ class FuncDefNode(StatNode, BlockNode):
         # incref it to properly keep track of refcounts.
         for entry in lenv.arg_entries:
             if entry.type.is_pyobject:
-                if entry.assignments and not entry.in_closure:
+                if entry.assignments or entry.in_closure:
                     code.put_var_incref(entry)
+                if entry.in_closure:
+                    code.put_var_giveref(entry)
 
         # ----- Initialise local variables 
-        #code.put('/* %s */'%(lenv.var_entries))
         for entry in lenv.var_entries:
             if entry.type.is_pyobject and entry.init_to_none and entry.used:
                 code.put_init_var_to_py_none(entry)
-        for entry in lenv.entries.values():
-            if entry.from_closure:
-                code.put_gotref(entry.cname)
+                if entry.in_closure:
+                    code.put_var_giveref(entry)
 
         # ----- Initialise local buffer auxiliary variables
         for entry in lenv.var_entries + lenv.arg_entries:
@@ -1421,18 +1421,11 @@ class FuncDefNode(StatNode, BlockNode):
             if entry.type.is_pyobject:
                 if entry.used and not entry.in_closure:
                     code.put_var_decref(entry)
-                elif entry.in_closure and self.needs_closure:
-                    code.put_giveref(entry.cname)
-        for entry in lenv.entries.values():
-            if entry.from_closure:
-                code.put_giveref(entry.cname)
 
         # Decref any increfed args
         for entry in lenv.arg_entries:
             if entry.type.is_pyobject:
-                if entry.in_closure:
-                    code.put_var_giveref(entry)
-                elif entry.assignments:
+                if entry.assignments and not entry.in_closure:
                     code.put_var_decref(entry)
         if self.needs_closure:
             code.put_decref(Naming.cur_scope_cname, lenv.scope_class.type)
@@ -2353,8 +2346,6 @@ class DefNode(FuncDefNode):
                 item = PyrexTypes.typecast(arg.type, PyrexTypes.py_object_type, item)
             entry = arg.entry
             code.putln("%s = %s;" % (entry.cname, item))
-            if entry.in_closure:
-                code.put_var_incref(entry)
         else:
             func = arg.type.from_py_function
             if func:
@@ -2760,8 +2751,6 @@ class DefNode(FuncDefNode):
                 self.generate_arg_conversion(arg, code)
             elif arg.entry.in_closure:
                 code.putln('%s = %s;' % (arg.entry.cname, arg.hdr_cname))
-                if arg.type.is_pyobject:
-                    code.put_var_incref(arg.entry)
 
     def generate_arg_conversion(self, arg, code):
         # Generate conversion code for one argument.
