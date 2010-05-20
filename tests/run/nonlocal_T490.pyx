@@ -20,12 +20,12 @@ def testNonlocal2():
     1
     """
     # 'nonlocal' NAME (',' NAME)*
-    x = 0
-    def f():
-        nonlocal x
-        x=1
-        print(x)
-    f()
+    xx = 0
+    def ff():
+        nonlocal xx
+        xx=1
+        print(xx)
+    ff()
 
 def testNonlocal3():
     """
