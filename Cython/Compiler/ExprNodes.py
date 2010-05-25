@@ -1487,6 +1487,8 @@ class NameNode(AtomicExprNode):
                     rhs.make_owned_reference(code)
                     if entry.is_cglobal:
                         code.put_gotref(self.py_result())
+                    if self.entry.in_closure or self.entry.from_closure:
+                        code.put_gotref(self.result())
                     if not self.lhs_of_first_assignment:
                         if entry.is_local and not Options.init_local_none:
                             initialized = entry.scope.control_flow.get_state((entry.name, 'initialized'), self.pos)
@@ -1501,6 +1503,11 @@ class NameNode(AtomicExprNode):
 
             code.putln('%s = %s;' % (self.result(),
                                      rhs.result_as(self.ctype())))
+
+            if self.type.is_pyobject and self.use_managed_ref \
+                    and (self.entry.in_closure or self.entry.from_closure):
+                code.put_giveref(self.result())
+
             if debug_disposal_code:
                 print("NameNode.generate_assignment_code:")
                 print("...generating post-assignment code for %s" % rhs)

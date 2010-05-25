@@ -1,10 +1,9 @@
-def testNonlocal1():
+def simple():
     """
-    >>> testNonlocal1() 
+    >>> simple() 
     1
     2
     """
-    # 'nonlocal' NAME (',' NAME)*
     x = 1
     y = 2
     def f():
@@ -14,30 +13,42 @@ def testNonlocal1():
         print(y)
     f()
 
-def testNonlocal2():
+def assign():
     """
-    >>> testNonlocal2() 
+    >>> assign() 
     1
     """
-    # 'nonlocal' NAME (',' NAME)*
-    x = 0
-    def f():
-        nonlocal x
-        x=1
-        print(x)
-    f()
+    xx = 0
+    def ff():
+        nonlocal xx
+        xx=1
+        print(xx)
+    ff()
 
-def testNonlocal3():
+def nested():
     """
-    >>> testNonlocal3() 
+    >>> nested() 
     1
     """
-    # 'nonlocal' NAME (',' NAME)*
     x = 0
-    def f():
-        def g():
+    def fx():
+        def gx():
             nonlocal x
             x=1
             print(x)
-        return g
-    f()()
+        return gx
+    fx()()
+
+def arg(x):
+    """
+    >>> arg('x')
+    xyy
+    """
+    def appendy():
+        nonlocal x
+        x += 'y'
+    x+='y'
+    appendy()
+    print x
+    return
+
