@@ -21,7 +21,7 @@ def assign():
     xx = 0
     def ff():
         nonlocal xx
-        xx=1
+        xx += 1
         print(xx)
     ff()
 
@@ -50,5 +50,17 @@ def arg(x):
     x+='y'
     appendy()
     print x
+    return
+
+def argtype(int n):
+    """
+    >>> argtype(0)
+    1
+    """
+    def inc():
+        nonlocal n
+        n += 1
+    inc()
+    print n
     return
 
