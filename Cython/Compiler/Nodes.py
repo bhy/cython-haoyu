@@ -3923,7 +3923,7 @@ class RaiseStatNode(StatNode):
         else:
             cause_code = "0"
         code.putln(
-            "__Pyx_Raise(%s, %s, %s);" % (
+            "__Pyx_Raise(%s, %s, %s, %s);" % (
                 type_code,
                 value_code,
                 tb_code,
@@ -5664,10 +5664,10 @@ static void __Pyx_Raise(PyObject *type, PyObject *value, PyObject *tb, PyObject 
             fixed_cause = PyObject_CallObject(cause, NULL);
             if (fixed_cause == NULL)
                 goto bad;
-            Py_DECREF(cause);
         }
         else if (PyExceptionInstance_Check(cause)) {
             fixed_cause = cause;
+            Py_INCREF(fixed_cause);
         }
         else {
             PyErr_SetString(PyExc_TypeError,
@@ -5675,6 +5675,11 @@ static void __Pyx_Raise(PyObject *type, PyObject *value, PyObject *tb, PyObject 
                             "BaseException");
             goto bad;
         }
+
+        if (!value) {
+            value = PyObject_CallObject(type, NULL);
+        }
+
         PyException_SetCause(value, fixed_cause);
     }
 
