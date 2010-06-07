@@ -4116,30 +4116,6 @@ class InlinedGeneratorExpressionNode(GeneratorExpressionNode):
         self.loop.generate_execution_code(code)
 
 
-class GeneratorExpressionNode(ExprNode):
-    # A generator expression, e.g.  (i for i in range(10))
-    #
-    # Result is a generator.
-    #
-    # loop   ForStatNode   the for-loop, containing a YieldExprNode
-    subexprs = []
-    child_attrs = ["loop"]
-
-    type = py_object_type
-
-    def analyse_declarations(self, env):
-        self.loop.analyse_declarations(env)
-
-    def analyse_types(self, env):
-        self.loop.analyse_expressions(env)
-
-    def may_be_none(self):
-        return False
-
-    def annotate(self, code):
-        self.loop.annotate(code)
-
-
 class SetNode(ExprNode):
     #  Set constructor.
 
