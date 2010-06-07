@@ -55,3 +55,13 @@ def dict_comp():
     result = {x:x*2 for x in range(5) if x % 2 == 0}
     assert x == 'abc' # don't leak
     return result
+
+def except_catch():
+    """
+    >>> except_catch()
+    """
+    try:
+        raise Exception('foo')
+    except Exception as foo:
+        pass
+    return
