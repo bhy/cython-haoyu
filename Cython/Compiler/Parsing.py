@@ -777,7 +777,7 @@ def p_list_maker(s):
         target = ExprNodes.ListNode(pos, args = [])
         append = ExprNodes.ComprehensionAppendNode(
             pos, expr=expr, target=ExprNodes.CloneNode(target))
-        loop = p_comp_for(s, Nodes.ExprStatNode(append.pos, expr=append))
+        loop = p_comp_for(s, append)
         s.expect(']')
         return ExprNodes.ComprehensionNode(
             pos, loop=loop, append=append, target=target)
@@ -843,7 +843,7 @@ def p_dict_or_set_maker(s):
         target = ExprNodes.SetNode(pos, args=[])
         append = ExprNodes.ComprehensionAppendNode(
             item.pos, expr=item, target=ExprNodes.CloneNode(target))
-        loop = p_comp_for(s, Nodes.ExprStatNode(append.pos, expr=append))
+        loop = p_comp_for(s, append)
         s.expect('}')
         return ExprNodes.ComprehensionNode(
             pos, loop=loop, append=append, target=target)
@@ -858,7 +858,7 @@ def p_dict_or_set_maker(s):
             append = ExprNodes.DictComprehensionAppendNode(
                 item.pos, key_expr=key, value_expr=value,
                 target=ExprNodes.CloneNode(target))
-            loop = p_comp_for(s, Nodes.ExprStatNode(append.pos, expr=append))
+            loop = p_comp_for(s, append)
             s.expect('}')
             return ExprNodes.ComprehensionNode(
                 pos, loop=loop, append=append, target=target)
@@ -1308,7 +1308,7 @@ def p_for_bounds(s, allow_testlist=True):
         s.next()
         iterator = p_for_iterator(s, allow_testlist)
         return { 'target': target, 'iterator': iterator }
-    else:
+    elif not s.in_python_file:
         if s.sy == 'from':
             s.next()
             bound1 = p_bit_expr(s)
@@ -1340,6 +1340,9 @@ def p_for_bounds(s, allow_testlist=True):
                 'relation2': rel2,
                 'bound2': bound2,
                 'step': step }
+    else:
+        s.expect('in')
+        return {}
 
 def p_for_from_relation(s):
     if s.sy in inequality_relations:
@@ -1641,7 +1644,7 @@ def p_statement(s, ctx, first_statement = 0):
         return node
     else:
         if ctx.api:
-            error(s.pos, "'api' not allowed with this statement")
+            s.error("'api' not allowed with this statement")
         elif s.sy == 'def':
             # def statements aren't allowed in pxd files, except
             # as part of a cdef class
@@ -1704,7 +1707,7 @@ def p_suite(s, ctx = Ctx(), with_doc = 0, with_pseudo_doc = 0):
         s.expect_dedent()
     else:
         if ctx.api:
-            error(s.pos, "'api' not allowed with this statement")
+            s.error("'api' not allowed with this statement")
         if ctx.level in ('module', 'class', 'function', 'other'):
             body = p_simple_statement_list(s, ctx)
         else:
@@ -2428,7 +2431,7 @@ def p_c_func_or_var_declaration(s, pos, ctx):
             overridable = ctx.overridable)
     else:
         #if api:
-        #    error(s.pos, "'api' not allowed with variable declaration")
+        #    s.error("'api' not allowed with variable declaration")
         declarators = [declarator]
         while s.sy == ',':
             s.next()
@@ -2702,6 +2705,9 @@ def p_module(s, pxd, full_module_name):
 
     directive_comments = p_compiler_directive_comments(s)
     s.parse_comments = False
+
+    if 'language_level' in directive_comments:
+        s.context.set_language_level(directive_comments['language_level'])
 
     doc = p_doc_string(s)
     if pxd:

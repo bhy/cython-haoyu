@@ -3490,7 +3490,7 @@ class InPlaceAssignmentNode(AssignmentNode):
         import ExprNodes
         if self.lhs.type.is_pyobject:
             self.rhs = self.rhs.coerce_to_pyobject(env)
-        elif self.rhs.type.is_pyobject:
+        elif self.rhs.type.is_pyobject or (self.lhs.type.is_numeric and self.rhs.type.is_numeric):
             self.rhs = self.rhs.coerce_to(self.lhs.type, env)
         if self.lhs.type.is_pyobject:
             self.result_value_temp = ExprNodes.PyTempNode(self.pos, env)
@@ -3578,7 +3578,7 @@ class InPlaceAssignmentNode(AssignmentNode):
                                              indices = indices,
                                              is_temp = self.dup.is_temp)
         else:
-            assert False
+            assert False, "Unsupported node: %s" % type(self.lhs)
         self.lhs = target_lhs
         return self.dup
     
