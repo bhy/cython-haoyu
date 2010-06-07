@@ -17,3 +17,13 @@ def unicode_literals():
     """
     print(isinstance(ustring, unicode) or type(ustring))
     return ustring
+
+def except_catch():
+    """
+    >>> except_catch()
+    """
+    try:
+        raise Exception('foo')
+    except Exception as foo:
+        pass
+    return
