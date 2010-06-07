@@ -13,6 +13,21 @@ def doit(x,y):
     """
     return x/y, x//y
 
+def cdoit(int x, int y):
+    """
+    >>> cdoit(1,2)
+    (0.5, 0.0)
+    >>> cdoit(4,3)
+    (1.3333333333333333, 1.0)
+    >>> cdoit(4,3.0)
+    (1.3333333333333333, 1.0)
+    >>> cdoit(4,2)
+    (2.0, 2.0)
+    """
+    cdef double a = x/y
+    cdef double b = x//y
+    return a, b
+
 def doit_inplace(x,y):
     """
     >>> doit_inplace(1,2)
