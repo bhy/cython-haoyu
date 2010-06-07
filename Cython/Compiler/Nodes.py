@@ -1312,12 +1312,18 @@ class FuncDefNode(StatNode, BlockNode):
         # incref it to properly keep track of refcounts.
         for entry in lenv.arg_entries:
             if entry.type.is_pyobject:
-                if entry.assignments and not entry.in_closure:
+                if entry.assignments or entry.in_closure:
                     code.put_var_incref(entry)
+                if entry.in_closure:
+                    code.put_var_giveref(entry)
+
         # ----- Initialise local variables 
         for entry in lenv.var_entries:
             if entry.type.is_pyobject and entry.init_to_none and entry.used:
                 code.put_init_var_to_py_none(entry)
+                if entry.in_closure:
+                    code.put_var_giveref(entry)
+
         # ----- Initialise local buffer auxiliary variables
         for entry in lenv.var_entries + lenv.arg_entries:
             if entry.type.is_buffer and entry.buffer_aux.buffer_info_var.used:
@@ -1415,14 +1421,11 @@ class FuncDefNode(StatNode, BlockNode):
             if entry.type.is_pyobject:
                 if entry.used and not entry.in_closure:
                     code.put_var_decref(entry)
-                elif entry.in_closure and self.needs_closure:
-                    code.put_giveref(entry.cname)
+
         # Decref any increfed args
         for entry in lenv.arg_entries:
             if entry.type.is_pyobject:
-                if entry.in_closure:
-                    code.put_var_giveref(entry)
-                elif entry.assignments:
+                if entry.assignments and not entry.in_closure:
                     code.put_var_decref(entry)
         if self.needs_closure:
             code.put_decref(Naming.cur_scope_cname, lenv.scope_class.type)
@@ -2343,8 +2346,6 @@ class DefNode(FuncDefNode):
                 item = PyrexTypes.typecast(arg.type, PyrexTypes.py_object_type, item)
             entry = arg.entry
             code.putln("%s = %s;" % (entry.cname, item))
-            if entry.in_closure:
-                code.put_var_incref(entry)
         else:
             func = arg.type.from_py_function
             if func:
@@ -2750,8 +2751,6 @@ class DefNode(FuncDefNode):
                 self.generate_arg_conversion(arg, code)
             elif arg.entry.in_closure:
                 code.putln('%s = %s;' % (arg.entry.cname, arg.hdr_cname))
-                if arg.type.is_pyobject:
-                    code.put_var_incref(arg.entry)
 
     def generate_arg_conversion(self, arg, code):
         # Generate conversion code for one argument.
@@ -3193,6 +3192,23 @@ class GlobalNode(StatNode):
         pass
 
 
+class NonlocalNode(StatNode):
+    # Nonlocal variable declaration via the 'nonlocal' keyword.
+    #
+    # names    [string]
+    
+    child_attrs = []
+
+    def analyse_declarations(self, env):
+        for name in self.names:
+            env.declare_nonlocal(name, self.pos)
+
+    def analyse_expressions(self, env):
+        pass
+    
+    def generate_execution_code(self, code):
+        pass
+
 class ExprStatNode(StatNode):
     #  Expression used as a statement.
     #
@@ -3490,7 +3506,7 @@ class InPlaceAssignmentNode(AssignmentNode):
         import ExprNodes
         if self.lhs.type.is_pyobject:
             self.rhs = self.rhs.coerce_to_pyobject(env)
-        elif self.rhs.type.is_pyobject:
+        elif self.rhs.type.is_pyobject or (self.lhs.type.is_numeric and self.rhs.type.is_numeric):
             self.rhs = self.rhs.coerce_to(self.lhs.type, env)
         if self.lhs.type.is_pyobject:
             self.result_value_temp = ExprNodes.PyTempNode(self.pos, env)
@@ -3578,7 +3594,7 @@ class InPlaceAssignmentNode(AssignmentNode):
                                              indices = indices,
                                              is_temp = self.dup.is_temp)
         else:
-            assert False
+            assert False, "Unsupported node: %s" % type(self.lhs)
         self.lhs = target_lhs
         return self.dup
     
