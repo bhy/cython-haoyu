@@ -860,7 +860,7 @@ class ExceptTransform(CythonTransform, SkipDeclarations):
         new_body = self.template.substitute({
                 u'BODY': node.body,
                 u'EXC': node.target,
-            })
+            }, pos=node.pos)
         node.body = new_body
         self.visitchildren(node)
         return node
