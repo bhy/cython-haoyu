@@ -1176,11 +1176,11 @@ class FuncDefNode(StatNode, BlockNode):
         while genv.is_py_class_scope or genv.is_c_class_scope:
             genv = env.outer_scope
         if self.needs_closure:
-            lenv = ClosureScope(name=self.entry.name,
+            lenv = ClosureScope(name=self.name,
                                 outer_scope = genv,
                                 scope_name=self.entry.cname)
         else:
-            lenv = LocalScope(name=self.entry.name,
+            lenv = LocalScope(name=self.name,
                               outer_scope=genv,
                               parent_scope=env)
         lenv.return_type = self.return_type
@@ -2101,14 +2101,15 @@ class DefNode(FuncDefNode):
         entry = env.declare_pyfunction(name, self.pos)
         self.entry = entry
         prefix = env.scope_prefix
+        cname = entry.cname
         entry.func_cname = \
-            Naming.pyfunc_prefix + prefix + name
+            Naming.pyfunc_prefix + prefix + cname
         entry.pymethdef_cname = \
-            Naming.pymethdef_prefix + prefix + name
+            Naming.pymethdef_prefix + prefix + cname
         if Options.docstrings:
             entry.doc = embed_position(self.pos, self.doc)
             entry.doc_cname = \
-                Naming.funcdoc_prefix + prefix + name
+                Naming.funcdoc_prefix + prefix + cname
         else:
             entry.doc = None
 
@@ -2170,12 +2171,7 @@ class DefNode(FuncDefNode):
 
     def needs_assignment_synthesis(self, env, code=None):
         # Should enable for module level as well, that will require more testing...
-        if env.is_module_scope:
-            if code is None:
-                return env.directives['binding']
-            else:
-                return code.globalstate.directives['binding']
-        return env.is_py_class_scope or env.is_closure_scope
+        return env.is_module_scope or env.is_py_class_scope or env.is_closure_scope
 
     def synthesize_assignment_node(self, env):
         import ExprNodes

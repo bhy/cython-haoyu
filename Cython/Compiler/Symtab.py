@@ -307,7 +307,7 @@ class Scope(object):
             count = 0
         self.id_counters[name] = count
         if name:
-            return '%s%d' % (name, count)
+            return '%s_%d' % (name, count)
         else:
             return '%d' % count
 
@@ -510,11 +510,15 @@ class Scope(object):
     
     def declare_pyfunction(self, name, pos):
         # Add an entry for a Python function.
+        cname = self.next_id(name)
         entry = self.lookup_here(name)
         if entry and not entry.type.is_cfunction:
+            # Remove the entry so we can redeclare
+            del self.entries[name]
             # This is legal Python, but for now will produce invalid C.
-            error(pos, "'%s' already declared" % name)
-        entry = self.declare_var(name, py_object_type, pos, visibility='extern')
+            #error(pos, "'%s' already declared" % name)
+            #assert(0)
+        entry = self.declare_var(name, py_object_type, pos, cname=cname, visibility='extern')
         entry.signature = pyfunction_signature
         self.pyfunc_entries.append(entry)
         return entry
