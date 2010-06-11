@@ -1176,11 +1176,11 @@ class FuncDefNode(StatNode, BlockNode):
         while genv.is_py_class_scope or genv.is_c_class_scope:
             genv = env.outer_scope
         if self.needs_closure:
-            lenv = ClosureScope(name=self.name,
+            lenv = ClosureScope(name=self.entry.name,
                                 outer_scope = genv,
                                 scope_name=self.entry.cname)
         else:
-            lenv = LocalScope(name=self.name,
+            lenv = LocalScope(name=self.entry.name,
                               outer_scope=genv,
                               parent_scope=env)
         lenv.return_type = self.return_type
@@ -1232,6 +1232,7 @@ class FuncDefNode(StatNode, BlockNode):
         # ----- Function header
         code.putln("")
         with_pymethdef = self.needs_assignment_synthesis(env, code)
+        #print 'generate_function_definitions:', env, lenv, with_pymethdef, self.entry
         if self.py_func:
             self.py_func.generate_function_header(code, 
                 with_pymethdef = with_pymethdef,
@@ -2170,8 +2171,8 @@ class DefNode(FuncDefNode):
             self.synthesize_assignment_node(env)
 
     def needs_assignment_synthesis(self, env, code=None):
-        # Should enable for module level as well, that will require more testing...
-        return env.is_module_scope or env.is_py_class_scope or env.is_closure_scope
+        has_method_flags = self.entry.signature.method_flags()
+        return has_method_flags and not self.is_wrapper and (env.is_module_scope or env.is_py_class_scope or env.is_closure_scope)
 
     def synthesize_assignment_node(self, env):
         import ExprNodes

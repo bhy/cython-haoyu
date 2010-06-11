@@ -508,7 +508,7 @@ class Scope(object):
     def declare_builtin(self, name, pos):
         return self.outer_scope.declare_builtin(name, pos)
     
-    def declare_pyfunction(self, name, pos):
+    def declare_pyfunction(self, name, pos, visibility='extern'):
         # Add an entry for a Python function.
         cname = self.next_id(name)
         entry = self.lookup_here(name)
@@ -518,7 +518,7 @@ class Scope(object):
             # This is legal Python, but for now will produce invalid C.
             #error(pos, "'%s' already declared" % name)
             #assert(0)
-        entry = self.declare_var(name, py_object_type, pos, cname=cname, visibility='extern')
+        entry = self.declare_var(name, py_object_type, pos, cname=cname, visibility=visibility)
         entry.signature = pyfunction_signature
         self.pyfunc_entries.append(entry)
         return entry
@@ -1319,15 +1319,16 @@ class ClosureScope(LocalScope):
 #        return "%s->%s" % (self.closure_cname, name)
 
     def declare_pyfunction(self, name, pos):
-        # Add an entry for a Python function.
-        entry = self.lookup_here(name)
-        if entry and not entry.type.is_cfunction:
-            # This is legal Python, but for now may produce invalid C.
-            error(pos, "'%s' already declared" % name)
-        entry = self.declare_var(name, py_object_type, pos)
-        entry.signature = pyfunction_signature
-        self.pyfunc_entries.append(entry)
-        return entry
+        return LocalScope.declare_pyfunction(self, name, pos, visibility='private')
+        ## Add an entry for a Python function.
+        #entry = self.lookup_here(name)
+        #if entry and not entry.type.is_cfunction:
+            ##This is legal Python, but for now may produce invalid C.
+            #error(pos, "'%s' already declared" % name)
+        #entry = self.declare_var(name, py_object_type, pos)
+        #entry.signature = pyfunction_signature
+        #self.pyfunc_entries.append(entry)
+        #return entry
 
 
 class StructOrUnionScope(Scope):
