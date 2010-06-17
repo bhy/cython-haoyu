@@ -119,7 +119,7 @@ class ResultRefNode(AtomicExprNode):
     subexprs = []
     lhs_of_first_assignment = False
 
-    def __init__(self, expression=None, pos=None):
+    def __init__(self, expression=None, pos=None, type=None):
         self.expression = expression
         self.pos = None
         if expression is not None:
@@ -128,6 +128,8 @@ class ResultRefNode(AtomicExprNode):
                 self.type = expression.type
         if pos is not None:
             self.pos = pos
+        if type is not None:
+            self.type = type
         assert self.pos is not None
 
     def analyse_types(self, env):
@@ -142,6 +144,11 @@ class ResultRefNode(AtomicExprNode):
         return True
 
     def result(self):
+        try:
+            return self.result_code
+        except AttributeError:
+            if self.expression is not None:
+                self.result_code = self.expression.result()
         return self.result_code
 
     def generate_evaluation_code(self, code):
