@@ -2166,6 +2166,7 @@ class DefNode(FuncDefNode):
     def analyse_expressions(self, env):
         self.local_scope.directives = env.directives
         self.analyse_default_values(env)
+        print self.entry, self.entry.assignments
         if self.needs_assignment_synthesis(env):
             # Shouldn't we be doing this at the module level too?
             self.synthesize_assignment_node(env)
@@ -2191,6 +2192,7 @@ class DefNode(FuncDefNode):
             rhs = rhs)
         self.assmt.analyse_declarations(env)
         self.assmt.analyse_expressions(env)
+        self.entry.assignments.append(rhs)
             
     def generate_function_header(self, code, with_pymethdef, proto_only=0):
         arg_code_list = []

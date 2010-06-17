@@ -5,6 +5,9 @@ True
 True
 >>> C().f()
 True
+>>> nonexist #doctest: +ELLIPSIS
+Traceback (most recent call last):
+NameError: name 'nonexist' is not defined
 """
 import math
 flag = math.pi
@@ -23,6 +26,10 @@ elif flag>2:
 else:
     def foo():
         return False
+
+if flag<3:
+    def nonexist():
+        pass
 
 cdef class Bar:
     def __init__(self):

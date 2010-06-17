@@ -1558,7 +1558,9 @@ class ModuleNode(Nodes.Node, Nodes.BlockNode):
             "static PyMethodDef %s[] = {" % 
                 env.method_table_cname)
         for entry in env.pyfunc_entries:
-            code.put_pymethoddef(entry, ",")
+            #print entry, entry.assignments
+            if not entry.assignments:
+                code.put_pymethoddef(entry, ",")
         code.putln(
                 "{0, 0, 0, 0}")
         code.putln(
