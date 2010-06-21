@@ -1312,11 +1312,8 @@ class FuncDefNode(StatNode, BlockNode):
         # incref it to properly keep track of refcounts.
         for entry in lenv.arg_entries:
             if entry.type.is_pyobject:
-                if entry.assignments or entry.in_closure:
+                if entry.assignments and not entry.in_closure:
                     code.put_var_incref(entry)
-                if entry.in_closure:
-                    code.put_var_giveref(entry)
-
         # ----- Initialise local variables 
         for entry in lenv.var_entries:
             if entry.type.is_pyobject and entry.init_to_none and entry.used:
@@ -1740,6 +1737,7 @@ class CFuncDefNode(FuncDefNode):
                     declarator = arg.declarator
                     while not hasattr(declarator, 'name'):
                         declarator = declarator.base
+                    #TODO(haoyu) These code is causing problem for closure inside cdef
                     code.putln('%s = %s->%s;' % (arg.cname, Naming.optional_args_cname, self.type.opt_arg_cname(declarator.name)))
                     i += 1
             for _ in range(self.type.optional_arg_count):
@@ -2341,19 +2339,26 @@ class DefNode(FuncDefNode):
             code.put_label(end_label)
 
     def generate_arg_assignment(self, arg, item, code):
+        entry = arg.entry
         if arg.type.is_pyobject:
             if arg.is_generic:
                 item = PyrexTypes.typecast(arg.type, PyrexTypes.py_object_type, item)
-            entry = arg.entry
-            code.putln("%s = %s;" % (entry.cname, item))
+            if entry.in_closure:
+                code.put_incref(item, arg.type)
+                code.putln("%s = %s;" % (entry.cname, item))
+                code.put_var_giveref(entry)
+            else:
+                code.putln("%s = %s;" % (entry.cname, item))
         else:
             func = arg.type.from_py_function
             if func:
                 code.putln("%s = %s(%s); %s" % (
-                    arg.entry.cname,
+                    entry.cname,
                     func,
                     item,
-                    code.error_goto_if(arg.type.error_condition(arg.entry.cname), arg.pos)))
+                    code.error_goto_if(arg.type.error_condition(entry.cname), arg.pos)))
+                if entry.in_closure:
+                    code.put_var_giveref(entry)
             else:
                 error(arg.pos, "Cannot convert Python object argument to type '%s'" % arg.type)
     
@@ -2750,7 +2755,12 @@ class DefNode(FuncDefNode):
             if arg.needs_conversion:
                 self.generate_arg_conversion(arg, code)
             elif arg.entry.in_closure:
-                code.putln('%s = %s;' % (arg.entry.cname, arg.hdr_cname))
+                if arg.type.is_pyobject:
+                    code.put_incref(arg.hdr_cname, arg.type)
+                    code.putln('%s = %s;' % (arg.entry.cname, arg.hdr_cname))
+                    code.put_var_giveref(arg.entry)
+                else:
+                    code.putln('%s = %s;' % (arg.entry.cname, arg.hdr_cname))
 
     def generate_arg_conversion(self, arg, code):
         # Generate conversion code for one argument.
