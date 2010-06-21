@@ -53,10 +53,10 @@ def all_item(x):
     """
     return all(x)
 
-@cython.test_assert_path_exists("//ForInStatNode")
+@cython.test_assert_path_exists("//ForInStatNode",
+                                "//InlinedGeneratorExpressionNode")
 @cython.test_fail_if_path_exists("//SimpleCallNode",
-                                 "//YieldExprNode",
-                                 "//GeneratorExpressionNode")
+                                 "//YieldExprNode")
 def all_in_simple_gen(seq):
     """
     >>> all_in_simple_gen([1,1,1])
@@ -82,10 +82,42 @@ def all_in_simple_gen(seq):
     """
     return all(x for x in seq)
 
-@cython.test_assert_path_exists("//ForInStatNode")
+@cython.test_assert_path_exists("//ForInStatNode",
+                                "//InlinedGeneratorExpressionNode")
 @cython.test_fail_if_path_exists("//SimpleCallNode",
-                                 "//YieldExprNode",
-                                 "//GeneratorExpressionNode")
+                                 "//YieldExprNode")
+def all_in_simple_gen_scope(seq):
+    """
+    >>> all_in_simple_gen_scope([1,1,1])
+    True
+    >>> all_in_simple_gen_scope([1,1,0])
+    False
+    >>> all_in_simple_gen_scope([1,0,1])
+    False
+
+    >>> all_in_simple_gen_scope(VerboseGetItem([1,1,1,1,1]))
+    0
+    1
+    2
+    3
+    4
+    5
+    True
+    >>> all_in_simple_gen_scope(VerboseGetItem([1,1,0,1,1]))
+    0
+    1
+    2
+    False
+    """
+    x = 'abc'
+    result = all(x for x in seq)
+    assert x == 'abc'
+    return result
+
+@cython.test_assert_path_exists("//ForInStatNode",
+                                "//InlinedGeneratorExpressionNode")
+@cython.test_fail_if_path_exists("//SimpleCallNode",
+                                 "//YieldExprNode")
 def all_in_conditional_gen(seq):
     """
     >>> all_in_conditional_gen([3,6,9])
@@ -114,10 +146,31 @@ def all_in_conditional_gen(seq):
     """
     return all(x%3 for x in seq if x%2 == 1)
 
-@cython.test_assert_path_exists("//ForInStatNode")
+mixed_ustring = u'AbcDefGhIjKlmnoP'
+lower_ustring = mixed_ustring.lower()
+upper_ustring = mixed_ustring.upper()
+
+@cython.test_assert_path_exists('//PythonCapiCallNode',
+                                '//ForFromStatNode')
+@cython.test_fail_if_path_exists('//SimpleCallNode',
+                                 '//ForInStatNode')
+def all_lower_case_characters(unicode ustring):
+    """
+    >>> all_lower_case_characters(mixed_ustring)
+    False
+    >>> all_lower_case_characters(upper_ustring)
+    False
+    >>> all_lower_case_characters(lower_ustring)
+    True
+    """
+    return all(uchar.islower() for uchar in ustring)
+
+@cython.test_assert_path_exists("//ForInStatNode",
+                                "//InlinedGeneratorExpressionNode",
+                                "//InlinedGeneratorExpressionNode//IfStatNode")
 @cython.test_fail_if_path_exists("//SimpleCallNode",
                                  "//YieldExprNode",
-                                 "//GeneratorExpressionNode")
+                                 "//IfStatNode//CoerceToBooleanNode")
 def all_in_typed_gen(seq):
     """
     >>> all_in_typed_gen([1,1,1])
@@ -141,33 +194,33 @@ def all_in_typed_gen(seq):
     4
     False
     """
-    # FIXME: this isn't really supposed to work, but it currently does
-    # due to incorrect scoping - this should be fixed!!
     cdef int x
     return all(x for x in seq)
 
-@cython.test_assert_path_exists("//ForInStatNode")
+@cython.test_assert_path_exists("//ForInStatNode",
+                                "//InlinedGeneratorExpressionNode",
+                                "//InlinedGeneratorExpressionNode//IfStatNode")
 @cython.test_fail_if_path_exists("//SimpleCallNode",
                                  "//YieldExprNode",
-                                 "//GeneratorExpressionNode")
-def all_in_nested_gen(seq):
+                                 "//IfStatNode//CoerceToBooleanNode")
+def all_in_double_gen(seq):
     """
     >>> all(x for L in [[1,1,1],[1,1,1],[1,1,1]] for x in L)
     True
-    >>> all_in_nested_gen([[1,1,1],[1,1,1],[1,1,1]])
+    >>> all_in_double_gen([[1,1,1],[1,1,1],[1,1,1]])
     True
 
     >>> all(x for L in [[1,1,1],[1,1,1],[1,1,0]] for x in L)
     False
-    >>> all_in_nested_gen([[1,1,1],[1,1,1],[1,1,0]])
+    >>> all_in_double_gen([[1,1,1],[1,1,1],[1,1,0]])
     False
 
     >>> all(x for L in [[1,1,1],[0,1,1],[1,1,1]] for x in L)
     False
-    >>> all_in_nested_gen([[1,1,1],[0,1,1],[1,1,1]])
+    >>> all_in_double_gen([[1,1,1],[0,1,1],[1,1,1]])
     False
 
-    >>> all_in_nested_gen([VerboseGetItem([1,1,1]), VerboseGetItem([1,1,1,1,1])])
+    >>> all_in_double_gen([VerboseGetItem([1,1,1]), VerboseGetItem([1,1,1,1,1])])
     0
     1
     2
@@ -179,7 +232,7 @@ def all_in_nested_gen(seq):
     4
     5
     True
-    >>> all_in_nested_gen([VerboseGetItem([1,1,1]),VerboseGetItem([1,1]),VerboseGetItem([1,1,0])])
+    >>> all_in_double_gen([VerboseGetItem([1,1,1]),VerboseGetItem([1,1]),VerboseGetItem([1,1,0])])
     0
     1
     2
@@ -192,7 +245,5 @@ def all_in_nested_gen(seq):
     2
     False
     """
-    # FIXME: this isn't really supposed to work, but it currently does
-    # due to incorrect scoping - this should be fixed!!
     cdef int x
     return all(x for L in seq for x in L)

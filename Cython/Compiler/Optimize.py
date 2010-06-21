@@ -1022,52 +1022,6 @@ class EarlyReplaceBuiltinCalls(Visitor.EnvTransform):
 
     # specific handlers for simple call nodes
 
-    def _handle_simple_function_set(self, node, pos_args):
-        """Replace set([a,b,...]) by a literal set {a,b,...} and
-        set([ x for ... ]) by a literal { x for ... }.
-        """
-        arg_count = len(pos_args)
-        if arg_count == 0:
-            return ExprNodes.SetNode(node.pos, args=[],
-                                     type=Builtin.set_type)
-        if arg_count > 1:
-            return node
-        iterable = pos_args[0]
-        if isinstance(iterable, (ExprNodes.ListNode, ExprNodes.TupleNode)):
-            return ExprNodes.SetNode(node.pos, args=iterable.args)
-        elif isinstance(iterable, ExprNodes.ComprehensionNode) and \
-                 isinstance(iterable.target, (ExprNodes.ListNode,
-                                              ExprNodes.SetNode)):
-            iterable.target = ExprNodes.SetNode(node.pos, args=[])
-            iterable.pos = node.pos
-            return iterable
-        else:
-            return node
-
-    def _handle_simple_function_dict(self, node, pos_args):
-        """Replace dict([ (a,b) for ... ]) by a literal { a:b for ... }.
-        """
-        if len(pos_args) != 1:
-            return node
-        arg = pos_args[0]
-        if isinstance(arg, ExprNodes.ComprehensionNode) and \
-               isinstance(arg.target, (ExprNodes.ListNode,
-                                       ExprNodes.SetNode)):
-            append_node = arg.append
-            if isinstance(append_node.expr, (ExprNodes.TupleNode, ExprNodes.ListNode)) and \
-                   len(append_node.expr.args) == 2:
-                key_node, value_node = append_node.expr.args
-                target_node = ExprNodes.DictNode(
-                    pos=arg.target.pos, key_value_pairs=[])
-                new_append_node = ExprNodes.DictComprehensionAppendNode(
-                    append_node.pos, target=target_node,
-                    key_expr=key_node, value_expr=value_node)
-                arg.target = target_node
-                arg.type = target_node.type
-                replace_in = Visitor.RecursiveNodeReplacer(append_node, new_append_node)
-                return replace_in(arg)
-        return node
-
     def _handle_simple_function_float(self, node, pos_args):
         if len(pos_args) == 0:
             return ExprNodes.FloatNode(node.pos, value='0.0')
@@ -1084,6 +1038,13 @@ class EarlyReplaceBuiltinCalls(Visitor.EnvTransform):
         def visit_YieldExprNode(self, node):
             self.yield_nodes.append(node)
             self.visitchildren(node)
+
+    def _find_single_yield_node(self, node):
+        collector = self.YieldNodeCollector()
+        collector.visitchildren(node)
+        if len(collector.yield_nodes) != 1:
+            return None
+        return collector.yield_nodes[0]
 
     def _handle_simple_function_all(self, node, pos_args):
         """Transform
@@ -1130,24 +1091,19 @@ class EarlyReplaceBuiltinCalls(Visitor.EnvTransform):
             return node
         if not isinstance(pos_args[0], ExprNodes.GeneratorExpressionNode):
             return node
-        loop_node = pos_args[0].loop
-
-        collector = self.YieldNodeCollector()
-        collector.visitchildren(loop_node)
-        if len(collector.yield_nodes) != 1:
+        gen_expr_node = pos_args[0]
+        loop_node = gen_expr_node.loop
+        yield_node = self._find_single_yield_node(loop_node)
+        if yield_node is None:
             return node
-        yield_node = collector.yield_nodes[0]
         yield_expression = yield_node.arg
-        del collector
-
-        result_ref = UtilNodes.ResultRefNode(pos=node.pos)
-        result_ref.type = PyrexTypes.c_bint_type
 
         if is_any:
             condition = yield_expression
         else:
             condition = ExprNodes.NotNode(yield_expression.pos, operand = yield_expression)
 
+        result_ref = UtilNodes.ResultRefNode(pos=node.pos, type=PyrexTypes.c_bint_type)
         test_node = Nodes.IfStatNode(
             yield_node.pos,
             else_clause = None,
@@ -1180,9 +1136,154 @@ class EarlyReplaceBuiltinCalls(Visitor.EnvTransform):
             rhs = ExprNodes.BoolNode(yield_node.pos, value = not is_any,
                                      constant_result = not is_any))
 
-        Visitor.RecursiveNodeReplacer(yield_node, test_node).visitchildren(loop_node)
+        Visitor.recursively_replace_node(loop_node, yield_node, test_node)
 
-        return UtilNodes.TempResultFromStatNode(result_ref, loop_node)
+        return ExprNodes.InlinedGeneratorExpressionNode(
+            gen_expr_node.pos, loop = loop_node, result_node = result_ref,
+            expr_scope = gen_expr_node.expr_scope, orig_func = is_any and 'any' or 'all')
+
+    def _handle_simple_function_sum(self, node, pos_args):
+        """Transform sum(genexpr) into an equivalent inlined aggregation loop.
+        """
+        if len(pos_args) not in (1,2):
+            return node
+        if not isinstance(pos_args[0], ExprNodes.GeneratorExpressionNode):
+            return node
+        gen_expr_node = pos_args[0]
+        loop_node = gen_expr_node.loop
+
+        yield_node = self._find_single_yield_node(loop_node)
+        if yield_node is None:
+            return node
+        yield_expression = yield_node.arg
+
+        if len(pos_args) == 1:
+            start = ExprNodes.IntNode(node.pos, value='0', constant_result=0)
+        else:
+            start = pos_args[1]
+
+        result_ref = UtilNodes.ResultRefNode(pos=node.pos, type=PyrexTypes.py_object_type)
+        add_node = Nodes.SingleAssignmentNode(
+            yield_node.pos,
+            lhs = result_ref,
+            rhs = ExprNodes.binop_node(node.pos, '+', result_ref, yield_expression)
+            )
+
+        Visitor.recursively_replace_node(loop_node, yield_node, add_node)
+
+        exec_code = Nodes.StatListNode(
+            node.pos,
+            stats = [
+                Nodes.SingleAssignmentNode(
+                    start.pos,
+                    lhs = UtilNodes.ResultRefNode(pos=node.pos, expression=result_ref),
+                    rhs = start,
+                    first = True),
+                loop_node
+                ])
+
+        return ExprNodes.InlinedGeneratorExpressionNode(
+            gen_expr_node.pos, loop = exec_code, result_node = result_ref,
+            expr_scope = gen_expr_node.expr_scope, orig_func = 'sum')
+
+    def _DISABLED_handle_simple_function_tuple(self, node, pos_args):
+        if len(pos_args) == 0:
+            return ExprNodes.TupleNode(node.pos, args=[], constant_result=())
+        # This is a bit special - for iterables (including genexps),
+        # Python actually overallocates and resizes a newly created
+        # tuple incrementally while reading items, which we can't
+        # easily do without explicit node support. Instead, we read
+        # the items into a list and then copy them into a tuple of the
+        # final size.  This takes up to twice as much memory, but will
+        # have to do until we have real support for genexps.
+        result = self._transform_list_set_genexpr(node, pos_args, ExprNodes.ListNode)
+        if result is not node:
+            return ExprNodes.AsTupleNode(node.pos, arg=result)
+        return node
+
+    def _handle_simple_function_list(self, node, pos_args):
+        if len(pos_args) == 0:
+            return ExprNodes.ListNode(node.pos, args=[], constant_result=[])
+        return self._transform_list_set_genexpr(node, pos_args, ExprNodes.ListNode)
+
+    def _handle_simple_function_set(self, node, pos_args):
+        if len(pos_args) == 0:
+            return ExprNodes.SetNode(node.pos, args=[], constant_result=set())
+        return self._transform_list_set_genexpr(node, pos_args, ExprNodes.SetNode)
+
+    def _transform_list_set_genexpr(self, node, pos_args, container_node_class):
+        """Replace set(genexpr) and list(genexpr) by a literal comprehension.
+        """
+        if len(pos_args) > 1:
+            return node
+        if not isinstance(pos_args[0], ExprNodes.GeneratorExpressionNode):
+            return node
+        gen_expr_node = pos_args[0]
+        loop_node = gen_expr_node.loop
+
+        yield_node = self._find_single_yield_node(loop_node)
+        if yield_node is None:
+            return node
+        yield_expression = yield_node.arg
+
+        target_node = container_node_class(node.pos, args=[])
+        append_node = ExprNodes.ComprehensionAppendNode(
+            yield_node.pos,
+            expr = yield_expression,
+            target = ExprNodes.CloneNode(target_node))
+
+        Visitor.recursively_replace_node(loop_node, yield_node, append_node)
+
+        setcomp = ExprNodes.ComprehensionNode(
+            node.pos,
+            has_local_scope = True,
+            expr_scope = gen_expr_node.expr_scope,
+            loop = loop_node,
+            append = append_node,
+            target = target_node)
+        append_node.target = setcomp
+        return setcomp
+
+    def _handle_simple_function_dict(self, node, pos_args):
+        """Replace dict( (a,b) for ... ) by a literal { a:b for ... }.
+        """
+        if len(pos_args) == 0:
+            return ExprNodes.DictNode(node.pos, key_value_pairs=[], constant_result={})
+        if len(pos_args) > 1:
+            return node
+        if not isinstance(pos_args[0], ExprNodes.GeneratorExpressionNode):
+            return node
+        gen_expr_node = pos_args[0]
+        loop_node = gen_expr_node.loop
+
+        yield_node = self._find_single_yield_node(loop_node)
+        if yield_node is None:
+            return node
+        yield_expression = yield_node.arg
+
+        if not isinstance(yield_expression, ExprNodes.TupleNode):
+            return node
+        if len(yield_expression.args) != 2:
+            return node
+
+        target_node = ExprNodes.DictNode(node.pos, key_value_pairs=[])
+        append_node = ExprNodes.DictComprehensionAppendNode(
+            yield_node.pos,
+            key_expr = yield_expression.args[0],
+            value_expr = yield_expression.args[1],
+            target = ExprNodes.CloneNode(target_node))
+
+        Visitor.recursively_replace_node(loop_node, yield_node, append_node)
+
+        dictcomp = ExprNodes.ComprehensionNode(
+            node.pos,
+            has_local_scope = True,
+            expr_scope = gen_expr_node.expr_scope,
+            loop = loop_node,
+            append = append_node,
+            target = target_node)
+        append_node.target = dictcomp
+        return dictcomp
 
     # specific handlers for general call nodes
 
@@ -1616,7 +1717,6 @@ class OptimizeBuiltinCalls(Visitor.EnvTransform):
 
     _map_to_capi_len_function = {
         Builtin.unicode_type   : "PyUnicode_GET_SIZE",
-        Builtin.str_type       : "Py_SIZE", # works in Py2 and Py3
         Builtin.bytes_type     : "PyBytes_GET_SIZE",
         Builtin.list_type      : "PyList_GET_SIZE",
         Builtin.tuple_type     : "PyTuple_GET_SIZE",
@@ -1645,13 +1745,15 @@ class OptimizeBuiltinCalls(Visitor.EnvTransform):
             cfunc_name = self._map_to_capi_len_function(arg.type)
             if cfunc_name is None:
                 return node
-            if not arg.is_literal:
-                arg = arg.as_none_safe_node(
-                    "object of type 'NoneType' has no len()")
+            arg = arg.as_none_safe_node(
+                "object of type 'NoneType' has no len()")
             new_node = ExprNodes.PythonCapiCallNode(
                 node.pos, cfunc_name, self.PyObject_Size_func_type,
                 args = [arg],
                 is_temp = node.is_temp)
+        elif arg.type is PyrexTypes.c_py_unicode_type:
+            return ExprNodes.IntNode(node.pos, value='1', constant_result=1,
+                                     type=node.type)
         else:
             return node
         if node.type not in (PyrexTypes.c_size_t_type, PyrexTypes.c_py_ssize_t_type):
@@ -1673,6 +1775,63 @@ class OptimizeBuiltinCalls(Visitor.EnvTransform):
             args = pos_args,
             is_temp = False)
         return ExprNodes.CastNode(node, PyrexTypes.py_object_type)
+
+    def _handle_simple_function_min(self, node, pos_args):
+        return self._optimise_min_max(node, pos_args, '<')
+
+    def _handle_simple_function_max(self, node, pos_args):
+        return self._optimise_min_max(node, pos_args, '>')
+
+    def _optimise_min_max(self, node, args, operator):
+        """Replace min(a,b,...) and max(a,b,...) by explicit comparison code.
+        """
+        if len(args) <= 1:
+            # leave this to Python
+            return node
+        unpacked_args = []
+        for arg in args:
+            if isinstance(arg, ExprNodes.CoerceToPyTypeNode):
+                arg = arg.arg
+            unpacked_args.append(arg)
+        spanning_type = reduce(PyrexTypes.spanning_type,
+                               [ arg.type for arg in unpacked_args ])
+        is_pycompare = spanning_type.is_pyobject
+
+        result_ref = UtilNodes.ResultRefNode(pos=node.pos, type=spanning_type)
+
+        stats = [
+            Nodes.SingleAssignmentNode(
+                node.pos,
+                lhs = UtilNodes.ResultRefNode(pos=node.pos, expression=result_ref),
+                rhs = unpacked_args[0].coerce_to(spanning_type, self.current_env()),
+                first = True)
+            ]
+
+        for arg in unpacked_args[1:]:
+            stats.append(Nodes.IfStatNode(
+                arg.pos,
+                else_clause = None,
+                if_clauses = [ Nodes.IfClauseNode(
+                    arg.pos,
+                    condition = ExprNodes.PrimaryCmpNode(
+                        arg.pos,
+                        operand1 = arg.coerce_to(spanning_type, self.current_env()),
+                        operator = operator,
+                        operand2 = result_ref,
+                        is_pycmp = is_pycompare,
+                        is_temp = is_pycompare,
+                        type = is_pycompare and PyrexTypes.py_object_type or PyrexTypes.c_bint_type
+                        ).coerce_to_boolean(self.current_env()),
+                    body = Nodes.SingleAssignmentNode(
+                        arg.pos,
+                        lhs = result_ref,
+                        rhs = arg)
+                    )]
+                ))
+
+        return UtilNodes.TempResultFromStatNode(
+            result_ref, Nodes.StatListNode(node.pos, stats = stats)
+            ).coerce_to(node.type, self.current_env())
 
     ### special methods
 
@@ -1845,6 +2004,71 @@ class OptimizeBuiltinCalls(Visitor.EnvTransform):
 
 
     ### unicode type methods
+
+    PyUnicode_uchar_predicate_func_type = PyrexTypes.CFuncType(
+        PyrexTypes.c_bint_type, [
+            PyrexTypes.CFuncTypeArg("uchar", PyrexTypes.c_py_unicode_type, None),
+            ])
+
+    def _inject_unicode_predicate(self, node, args, is_unbound_method):
+        if is_unbound_method or len(args) != 1:
+            return node
+        ustring = args[0]
+        if not isinstance(ustring, ExprNodes.CoerceToPyTypeNode) or \
+               ustring.arg.type is not PyrexTypes.c_py_unicode_type:
+            return node
+        uchar = ustring.arg
+        method_name = node.function.attribute
+        if method_name == 'istitle':
+            # istitle() doesn't directly map to Py_UNICODE_ISTITLE()
+            utility_code = py_unicode_istitle_utility_code
+            function_name = '__Pyx_Py_UNICODE_ISTITLE'
+        else:
+            utility_code = None
+            function_name = 'Py_UNICODE_%s' % method_name.upper()
+        func_call = self._substitute_method_call(
+            node, function_name, self.PyUnicode_uchar_predicate_func_type,
+            method_name, is_unbound_method, [uchar],
+            utility_code = utility_code)
+        if node.type.is_pyobject:
+            func_call = func_call.coerce_to_pyobject(self.current_env)
+        return func_call
+
+    _handle_simple_method_unicode_isalnum   = _inject_unicode_predicate
+    _handle_simple_method_unicode_isalpha   = _inject_unicode_predicate
+    _handle_simple_method_unicode_isdecimal = _inject_unicode_predicate
+    _handle_simple_method_unicode_isdigit   = _inject_unicode_predicate
+    _handle_simple_method_unicode_islower   = _inject_unicode_predicate
+    _handle_simple_method_unicode_isnumeric = _inject_unicode_predicate
+    _handle_simple_method_unicode_isspace   = _inject_unicode_predicate
+    _handle_simple_method_unicode_istitle   = _inject_unicode_predicate
+    _handle_simple_method_unicode_isupper   = _inject_unicode_predicate
+
+    PyUnicode_uchar_conversion_func_type = PyrexTypes.CFuncType(
+        PyrexTypes.c_py_unicode_type, [
+            PyrexTypes.CFuncTypeArg("uchar", PyrexTypes.c_py_unicode_type, None),
+            ])
+
+    def _inject_unicode_character_conversion(self, node, args, is_unbound_method):
+        if is_unbound_method or len(args) != 1:
+            return node
+        ustring = args[0]
+        if not isinstance(ustring, ExprNodes.CoerceToPyTypeNode) or \
+               ustring.arg.type is not PyrexTypes.c_py_unicode_type:
+            return node
+        uchar = ustring.arg
+        method_name = node.function.attribute
+        function_name = 'Py_UNICODE_TO%s' % method_name.upper()
+        func_call = self._substitute_method_call(
+            node, function_name, self.PyUnicode_uchar_conversion_func_type,
+            method_name, is_unbound_method, [uchar])
+        if node.type.is_pyobject:
+            func_call = func_call.coerce_to_pyobject(self.current_env)
+        return func_call
+
+    _handle_simple_method_unicode_lower = _inject_unicode_character_conversion
+    _handle_simple_method_unicode_upper = _inject_unicode_character_conversion
+    _handle_simple_method_unicode_title = _inject_unicode_character_conversion
 
     PyUnicode_Splitlines_func_type = PyrexTypes.CFuncType(
         Builtin.list_type, [
@@ -2305,6 +2529,18 @@ class OptimizeBuiltinCalls(Visitor.EnvTransform):
         else:
             args[arg_index] = args[arg_index].coerce_to_boolean(self.current_env())
 
+
+py_unicode_istitle_utility_code = UtilityCode(
+# Py_UNICODE_ISTITLE() doesn't match unicode.istitle() as the latter
+# additionally allows character that comply with Py_UNICODE_ISUPPER()
+proto = '''
+static CYTHON_INLINE int __Pyx_Py_UNICODE_ISTITLE(Py_UNICODE uchar); /* proto */
+''',
+impl = '''
+static CYTHON_INLINE int __Pyx_Py_UNICODE_ISTITLE(Py_UNICODE uchar) {
+    return Py_UNICODE_ISTITLE(uchar) || Py_UNICODE_ISUPPER(uchar);
+}
+''')
 
 unicode_tailmatch_utility_code = UtilityCode(
     # Python's unicode.startswith() and unicode.endswith() support a

@@ -9,7 +9,10 @@ missing_baseclass_in_predecl_T262
 cfunc_call_tuple_args_T408
 cascaded_list_unpacking_T467
 compile.cpp_operators
+cpp_templated_ctypedef
+cpp_structs
 genexpr_T491
+with_statement_module_level_T536
 
 # CPython regression tests that don't current work:
 pyregr.test_threadsignals
