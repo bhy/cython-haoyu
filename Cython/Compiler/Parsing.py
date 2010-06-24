@@ -1161,7 +1161,7 @@ def p_raise_statement(s):
     else:
         return Nodes.ReraiseStatNode(pos)
 
-def p_import_statement(s):
+def p_import_statement(s, level=-1):
     # s.sy in ('import', 'cimport')
     pos = s.position()
     kind = s.sy
@@ -1189,6 +1189,7 @@ def p_import_statement(s):
                 rhs = ExprNodes.ImportNode(pos, 
                     module_name = ExprNodes.IdentifierStringNode(
                         pos, value = dotted_name),
+                    level = level,
                     name_list = name_list))
         stats.append(stat)
     return Nodes.StatListNode(pos, stats = stats)
@@ -1197,8 +1198,21 @@ def p_from_import_statement(s, first_statement = 0):
     # s.sy == 'from'
     pos = s.position()
     s.next()
+    if s.sy == '.':
+        level = 0
+        while s.sy=='.':
+            level += 1
+            s.next()
+    else:
+        level = -1 # attempt both relative and absolute import by default
+
+    if level>0 and s.sy=='import':
+        return p_import_statement(s, level=level)
+
     (dotted_name_pos, _, dotted_name, _) = \
         p_dotted_name(s, as_allowed = 0)
+    if level>0 and s.sy=='cimport':
+        s.error("Relative cimport is not supported")
     if s.sy in ('import', 'cimport'):
         kind = s.sy
         s.next()
@@ -1258,6 +1272,7 @@ def p_from_import_statement(s, first_statement = 0):
         return Nodes.FromImportStatNode(pos,
             module = ExprNodes.ImportNode(dotted_name_pos,
                 module_name = ExprNodes.IdentifierStringNode(pos, value = dotted_name),
+                level = level,
                 name_list = import_list),
             items = items)
 
