@@ -71,6 +71,27 @@ def slicing():
     t1 = t[1:2]
     assert typeof(t1) == "tuple object", typeof(t1)
 
+def indexing():
+    """
+    >>> indexing()
+    """
+    b = b"abc"
+    assert typeof(b) == "char *", typeof(b)
+    b1 = b[1]
+    assert typeof(b1) == "char", typeof(b1)  # FIXME: bytes object ??
+    u = u"xyz"
+    assert typeof(u) == "unicode object", typeof(u)
+    u1 = u[1]
+    assert typeof(u1) == "Py_UNICODE", typeof(u1)
+    L = [1,2,3]
+    assert typeof(L) == "list object", typeof(L)
+    L1 = L[1]
+    assert typeof(L1) == "Python object", typeof(L1)
+    t = (4,5,6)
+    assert typeof(t) == "tuple object", typeof(t)
+    t1 = t[1]
+    assert typeof(t1) == "Python object", typeof(t1)
+
 def multiple_assignments():
     """
     >>> multiple_assignments()
@@ -186,6 +207,65 @@ def loop():
     for d in range(0, 10L, 2):
         pass
     assert typeof(a) == "long"
+
+def loop_over_charptr():
+    """
+    >>> print( loop_over_charptr() )
+    char
+    """
+    cdef char* char_ptr_string = 'abcdefg'
+    for c in char_ptr_string:
+        pass
+    return typeof(c)
+
+def loop_over_bytes_literal():
+    """
+    >>> print( loop_over_bytes_literal() )
+    Python object
+    """
+    for c in b'abcdefg':
+        pass
+    return typeof(c)
+
+def loop_over_bytes():
+    """
+    >>> print( loop_over_bytes() )
+    Python object
+    """
+    cdef bytes bytes_string = b'abcdefg'
+    for c in bytes_string:
+        pass
+    return typeof(c)
+
+def loop_over_str():
+    """
+    >>> print( loop_over_str() )
+    str object
+    """
+    cdef str string = 'abcdefg'
+    for c in string:
+        pass
+    return typeof(c)
+
+def loop_over_unicode():
+    """
+    >>> print( loop_over_unicode() )
+    Py_UNICODE
+    """
+    cdef unicode ustring = u'abcdefg'
+    for uchar in ustring:
+        pass
+    return typeof(uchar)
+
+def loop_over_int_array():
+    """
+    >>> print( loop_over_int_array() )
+    int
+    """
+    cdef int[10] int_array
+    for i in int_array:
+        pass
+    return typeof(i)
 
 cdef unicode retu():
     return u"12345"

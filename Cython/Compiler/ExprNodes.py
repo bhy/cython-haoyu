@@ -792,12 +792,21 @@ class IntNode(ConstNode):
 
     unsigned = ""
     longness = ""
-    type = PyrexTypes.c_long_type
+
+    def __init__(self, pos, **kwds):
+        ExprNode.__init__(self, pos, **kwds)
+        if 'type' not in kwds:
+            rank = max(1, len(self.longness))
+            sign = not self.unsigned
+            self.type = PyrexTypes.modifiers_and_name_to_type[sign, rank, "int"]
 
     def coerce_to(self, dst_type, env):
         if self.type is dst_type:
             return self
-        node = IntNode(self.pos, value=self.value,
+        elif dst_type.is_float:
+            float_value = float(self.value)
+            return FloatNode(self.pos, value=repr(float_value), constant_result=float_value)
+        node = IntNode(self.pos, value=self.value, constant_result=self.constant_result,
                        unsigned=self.unsigned, longness=self.longness)
         if dst_type.is_numeric and not dst_type.is_complex:
             return node
@@ -1487,6 +1496,8 @@ class NameNode(AtomicExprNode):
                     rhs.make_owned_reference(code)
                     if entry.is_cglobal:
                         code.put_gotref(self.py_result())
+                    if self.entry.in_closure or self.entry.from_closure:
+                        code.put_gotref(self.result())
                     if not self.lhs_of_first_assignment:
                         if entry.is_local and not Options.init_local_none:
                             initialized = entry.scope.control_flow.get_state((entry.name, 'initialized'), self.pos)
@@ -1501,6 +1512,11 @@ class NameNode(AtomicExprNode):
 
             code.putln('%s = %s;' % (self.result(),
                                      rhs.result_as(self.ctype())))
+
+            if self.type.is_pyobject and self.use_managed_ref \
+                    and (self.entry.in_closure or self.entry.from_closure):
+                code.put_giveref(self.result())
+
             if debug_disposal_code:
                 print("NameNode.generate_assignment_code:")
                 print("...generating post-assignment code for %s" % rhs)
@@ -1580,10 +1596,11 @@ class BackquoteNode(ExprNode):
 class ImportNode(ExprNode):
     #  Used as part of import statement implementation.
     #  Implements result = 
-    #    __import__(module_name, globals(), None, name_list)
+    #    __import__(module_name, globals(), None, name_list, level)
     #
     #  module_name   StringNode            dotted name of module
     #  name_list     ListNode or None      list of names to be imported
+    #  level         int                   relative import level
     
     type = py_object_type
     
@@ -1606,10 +1623,11 @@ class ImportNode(ExprNode):
         else:
             name_list_code = "0"
         code.putln(
-            "%s = __Pyx_Import(%s, %s); %s" % (
+            "%s = __Pyx_Import(%s, %s, %d); %s" % (
                 self.result(),
                 self.module_name.py_result(),
                 name_list_code,
+                self.level,
                 code.error_goto_if_null(self.result(), self.pos)))
         code.put_gotref(self.py_result())
 
@@ -1905,12 +1923,12 @@ class IndexNode(ExprNode):
         return self.base.type_dependencies(env)
     
     def infer_type(self, env):
-        if isinstance(self.base, StringNode): # FIXME: BytesNode?
+        if isinstance(self.base, BytesNode):
             return py_object_type
         base_type = self.base.infer_type(env)
         if base_type.is_ptr or base_type.is_array:
             return base_type.base_type
-        elif base_type is Builtin.unicode_type and self.index.infer_type(env).is_int:
+        elif base_type is unicode_type and self.index.infer_type(env).is_int:
             # Py_UNICODE will automatically coerce to a unicode string
             # if required, so this is safe. We only infer Py_UNICODE
             # when the index is a C integer type. Otherwise, we may
@@ -1919,6 +1937,9 @@ class IndexNode(ExprNode):
             # to receive it, throw it away, and potentially rebuild it
             # on a subsequent PyObject coercion.
             return PyrexTypes.c_py_unicode_type
+        elif base_type in (str_type, unicode_type):
+            # these types will always return themselves on Python indexing
+            return base_type
         else:
             # TODO: Handle buffers (hopefully without too much redundancy).
             return py_object_type
@@ -1993,6 +2014,15 @@ class IndexNode(ExprNode):
             elif not skip_child_analysis:
                 self.index.analyse_types(env)
             self.original_index_type = self.index.type
+            if base_type is PyrexTypes.c_py_unicode_type:
+                # we infer Py_UNICODE for unicode strings in some
+                # cases, but indexing must still work for them
+                if self.index.constant_result in (0, -1):
+                    # FIXME: we know that this node is redundant -
+                    # currently, this needs to get handled in Optimize.py
+                    pass
+                self.base = self.base.coerce_to_pyobject(env)
+                base_type = self.base.type
             if base_type.is_pyobject:
                 if self.index.type.is_int:
                     if (not setting
@@ -3886,21 +3916,66 @@ class ListNode(SequenceNode):
             # generate_evaluation_code which will do that.
 
 
-class ComprehensionNode(ExprNode):
+class ScopedExprNode(ExprNode):
+    # Abstract base class for ExprNodes that have their own local
+    # scope, such as generator expressions.
+    #
+    # expr_scope    Scope  the inner scope of the expression
+
+    subexprs = []
+    expr_scope = None
+
+    def analyse_types(self, env):
+        # nothing to do here, the children will be analysed separately
+        pass
+
+    def analyse_expressions(self, env):
+        # nothing to do here, the children will be analysed separately
+        pass
+
+    def analyse_scoped_expressions(self, env):
+        # this is called with the expr_scope as env
+        pass
+
+    def init_scope(self, outer_scope, expr_scope=None):
+        self.expr_scope = expr_scope
+
+
+class ComprehensionNode(ScopedExprNode):
     subexprs = ["target"]
     child_attrs = ["loop", "append"]
+
+    # different behaviour in Py2 and Py3: leak loop variables or not?
+    has_local_scope = False # Py2 behaviour as default
 
     def infer_type(self, env):
         return self.target.infer_type(env)
 
     def analyse_declarations(self, env):
         self.append.target = self # this is used in the PyList_Append of the inner loop
-        self.loop.analyse_declarations(env)
+        self.init_scope(env)
+        if self.expr_scope is not None:
+            self.loop.analyse_declarations(self.expr_scope)
+        else:
+            self.loop.analyse_declarations(env)
+
+    def init_scope(self, outer_scope, expr_scope=None):
+        if expr_scope is not None:
+            self.expr_scope = expr_scope
+        elif self.has_local_scope:
+            self.expr_scope = Symtab.GeneratorExpressionScope(outer_scope)
+        else:
+            self.expr_scope = None
 
     def analyse_types(self, env):
         self.target.analyse_expressions(env)
         self.type = self.target.type
-        self.loop.analyse_expressions(env)
+        if not self.has_local_scope:
+            self.loop.analyse_expressions(env)
+
+    def analyse_scoped_expressions(self, env):
+        if self.has_local_scope:
+            self.loop.analyse_expressions(env)
 
     def may_be_none(self):
         return False
@@ -3918,20 +3993,20 @@ class ComprehensionNode(ExprNode):
         self.loop.annotate(code)
 
 
-class ComprehensionAppendNode(ExprNode):
+class ComprehensionAppendNode(Node):
     # Need to be careful to avoid infinite recursion:
     # target must not be in child_attrs/subexprs
-    subexprs = ['expr']
+
+    child_attrs = ['expr']
 
     type = PyrexTypes.c_int_type
     
-    def analyse_types(self, env):
-        self.expr.analyse_types(env)
+    def analyse_expressions(self, env):
+        self.expr.analyse_expressions(env)
         if not self.expr.type.is_pyobject:
             self.expr = self.expr.coerce_to_pyobject(env)
-        self.is_temp = 1
 
-    def generate_result_code(self, code):
+    def generate_execution_code(self, code):
         if self.target.type is list_type:
             function = "PyList_Append"
         elif self.target.type is set_type:
@@ -3939,50 +4014,80 @@ class ComprehensionAppendNode(ExprNode):
         else:
             raise InternalError(
                 "Invalid type for comprehension node: %s" % self.target.type)
-            
-        code.putln("%s = %s(%s, (PyObject*)%s); %s" %
-            (self.result(),
-             function,
-             self.target.result(),
-             self.expr.result(),
-             code.error_goto_if(self.result(), self.pos)))
+
+        self.expr.generate_evaluation_code(code)
+        code.putln(code.error_goto_if("%s(%s, (PyObject*)%s)" % (
+            function,
+            self.target.result(),
+            self.expr.result()
+            ), self.pos))
+        self.expr.generate_disposal_code(code)
+        self.expr.free_temps(code)
+
+    def generate_function_definitions(self, env, code):
+        self.expr.generate_function_definitions(env, code)
+
+    def annotate(self, code):
+        self.expr.annotate(code)
 
 class DictComprehensionAppendNode(ComprehensionAppendNode):
-    subexprs = ['key_expr', 'value_expr']
+    child_attrs = ['key_expr', 'value_expr']
 
-    def analyse_types(self, env):
-        self.key_expr.analyse_types(env)
+    def analyse_expressions(self, env):
+        self.key_expr.analyse_expressions(env)
         if not self.key_expr.type.is_pyobject:
             self.key_expr = self.key_expr.coerce_to_pyobject(env)
-        self.value_expr.analyse_types(env)
+        self.value_expr.analyse_expressions(env)
         if not self.value_expr.type.is_pyobject:
             self.value_expr = self.value_expr.coerce_to_pyobject(env)
-        self.is_temp = 1
 
-    def generate_result_code(self, code):
-        code.putln("%s = PyDict_SetItem(%s, (PyObject*)%s, (PyObject*)%s); %s" %
-            (self.result(),
-             self.target.result(),
-             self.key_expr.result(),
-             self.value_expr.result(),
-             code.error_goto_if(self.result(), self.pos)))
+    def generate_execution_code(self, code):
+        self.key_expr.generate_evaluation_code(code)
+        self.value_expr.generate_evaluation_code(code)
+        code.putln(code.error_goto_if("PyDict_SetItem(%s, (PyObject*)%s, (PyObject*)%s)" % (
+            self.target.result(),
+            self.key_expr.result(),
+            self.value_expr.result()
+            ), self.pos))
+        self.key_expr.generate_disposal_code(code)
+        self.key_expr.free_temps(code)
+        self.value_expr.generate_disposal_code(code)
+        self.value_expr.free_temps(code)
+
+    def generate_function_definitions(self, env, code):
+        self.key_expr.generate_function_definitions(env, code)
+        self.value_expr.generate_function_definitions(env, code)
+
+    def annotate(self, code):
+        self.key_expr.annotate(code)
+        self.value_expr.annotate(code)
 
 
-class GeneratorExpressionNode(ExprNode):
+class GeneratorExpressionNode(ScopedExprNode):
     # A generator expression, e.g.  (i for i in range(10))
     #
     # Result is a generator.
     #
-    # loop   ForStatNode   the for-loop, containing a YieldExprNode
-    subexprs = []
+    # loop      ForStatNode   the for-loop, containing a YieldExprNode
+
     child_attrs = ["loop"]
 
     type = py_object_type
 
     def analyse_declarations(self, env):
-        self.loop.analyse_declarations(env)
+        self.init_scope(env)
+        self.loop.analyse_declarations(self.expr_scope)
+
+    def init_scope(self, outer_scope, expr_scope=None):
+        if expr_scope is not None:
+            self.expr_scope = expr_scope
+        else:
+            self.expr_scope = Symtab.GeneratorExpressionScope(outer_scope)
 
     def analyse_types(self, env):
+        self.is_temp = True
+
+    def analyse_scoped_expressions(self, env):
         self.loop.analyse_expressions(env)
 
     def may_be_none(self):
@@ -3990,6 +4095,34 @@ class GeneratorExpressionNode(ExprNode):
 
     def annotate(self, code):
         self.loop.annotate(code)
+
+
+class InlinedGeneratorExpressionNode(GeneratorExpressionNode):
+    # An inlined generator expression for which the result is
+    # calculated inside of the loop.  This will only be created by
+    # transforms when replacing builtin calls on generator
+    # expressions.
+    #
+    # loop           ForStatNode      the for-loop, not containing any YieldExprNodes
+    # result_node    ResultRefNode    the reference to the result value temp
+    # orig_func      String           the name of the builtin function this node replaces
+
+    child_attrs = ["loop"]
+
+    def analyse_types(self, env):
+        self.type = self.result_node.type
+        self.is_temp = True
+
+    def coerce_to(self, dst_type, env):
+        if self.orig_func == 'sum' and dst_type.is_numeric:
+            # we can optimise by dropping the aggregation variable into C
+            self.result_node.type = self.type = dst_type
+            return self
+        return GeneratorExpressionNode.coerce_to(self, dst_type, env)
+
+    def generate_result_code(self, code):
+        self.result_node.result_code = self.result()
+        self.loop.generate_execution_code(code)
 
 
 class SetNode(ExprNode):
@@ -5125,7 +5258,7 @@ class NumBinopNode(BinopNode):
             return
         if self.type.is_complex:
             self.infix = False
-        if not self.infix:
+        if not self.infix or (type1.is_numeric and type2.is_numeric):
             self.operand1 = self.operand1.coerce_to(self.type, env)
             self.operand2 = self.operand2.coerce_to(self.type, env)
     
@@ -5631,7 +5764,7 @@ class CmpNode(object):
     #  Mixin class containing code common to PrimaryCmpNodes
     #  and CascadedCmpNodes.
     
-    def infer_types(self, env):
+    def infer_type(self, env):
         # TODO: Actually implement this (after merging with -unstable).
         return py_object_type
 
@@ -6360,7 +6493,9 @@ class CoerceToPyTypeNode(CoercionNode):
         if type is not py_object_type:
             self.type = py_object_type
         elif arg.type.is_string:
-            self.type = Builtin.bytes_type
+            self.type = bytes_type
+        elif arg.type is PyrexTypes.c_py_unicode_type:
+            self.type = unicode_type
 
     gil_message = "Converting to Python object"
 
@@ -6689,16 +6824,17 @@ static PyObject *__Pyx_GetName(PyObject *dict, PyObject *name) {
 
 import_utility_code = UtilityCode(
 proto = """
-static PyObject *__Pyx_Import(PyObject *name, PyObject *from_list); /*proto*/
+static PyObject *__Pyx_Import(PyObject *name, PyObject *from_list, long level); /*proto*/
 """,
 impl = """
-static PyObject *__Pyx_Import(PyObject *name, PyObject *from_list) {
+static PyObject *__Pyx_Import(PyObject *name, PyObject *from_list, long level) {
     PyObject *py_import = 0;
     PyObject *empty_list = 0;
     PyObject *module = 0;
     PyObject *global_dict = 0;
     PyObject *empty_dict = 0;
     PyObject *list;
+    PyObject *py_level = 0;
     py_import = __Pyx_GetAttrString(%(BUILTINS)s, "__import__");
     if (!py_import)
         goto bad;
@@ -6716,8 +6852,11 @@ static PyObject *__Pyx_Import(PyObject *name, PyObject *from_list) {
     empty_dict = PyDict_New();
     if (!empty_dict)
         goto bad;
+    py_level = PyInt_FromLong(level);
+    if (!py_level)
+        goto bad;
     module = PyObject_CallFunctionObjArgs(py_import,
-        name, global_dict, empty_dict, list, NULL);
+        name, global_dict, empty_dict, list, py_level, NULL);
 bad:
     Py_XDECREF(empty_list);
     Py_XDECREF(py_import);

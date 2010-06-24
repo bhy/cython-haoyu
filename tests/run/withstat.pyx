@@ -111,3 +111,32 @@ def typed():
     with c as i:
         i += 11
         print i
+
+def multimanager():
+    """
+    >>> multimanager()
+    enter
+    enter
+    enter
+    enter
+    enter
+    enter
+    2
+    value
+    1 2 3 4 5
+    nested
+    exit <type 'NoneType'> <type 'NoneType'> <type 'NoneType'>
+    exit <type 'NoneType'> <type 'NoneType'> <type 'NoneType'>
+    exit <type 'NoneType'> <type 'NoneType'> <type 'NoneType'>
+    exit <type 'NoneType'> <type 'NoneType'> <type 'NoneType'>
+    exit <type 'NoneType'> <type 'NoneType'> <type 'NoneType'>
+    exit <type 'NoneType'> <type 'NoneType'> <type 'NoneType'>
+    """
+    with ContextManager(1), ContextManager(2) as x, ContextManager(u'value') as y,\
+            ContextManager(3), ContextManager((1, 2, (3, (4, 5)))) as (a, b, (c, (d, e))):
+        with ContextManager(u'nested') as nested:
+            print x
+            print y
+            print a, b, c, d, e
+            print nested
+

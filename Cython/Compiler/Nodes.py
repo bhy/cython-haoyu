@@ -1318,6 +1318,9 @@ class FuncDefNode(StatNode, BlockNode):
         for entry in lenv.var_entries:
             if entry.type.is_pyobject and entry.init_to_none and entry.used:
                 code.put_init_var_to_py_none(entry)
+                if entry.in_closure:
+                    code.put_var_giveref(entry)
+
         # ----- Initialise local buffer auxiliary variables
         for entry in lenv.var_entries + lenv.arg_entries:
             if entry.type.is_buffer and entry.buffer_aux.buffer_info_var.used:
@@ -1415,14 +1418,11 @@ class FuncDefNode(StatNode, BlockNode):
             if entry.type.is_pyobject:
                 if entry.used and not entry.in_closure:
                     code.put_var_decref(entry)
-                elif entry.in_closure and self.needs_closure:
-                    code.put_giveref(entry.cname)
+
         # Decref any increfed args
         for entry in lenv.arg_entries:
             if entry.type.is_pyobject:
-                if entry.in_closure:
-                    code.put_var_giveref(entry)
-                elif entry.assignments:
+                if entry.assignments and not entry.in_closure:
                     code.put_var_decref(entry)
         if self.needs_closure:
             code.put_decref(Naming.cur_scope_cname, lenv.scope_class.type)
@@ -1737,6 +1737,7 @@ class CFuncDefNode(FuncDefNode):
                     declarator = arg.declarator
                     while not hasattr(declarator, 'name'):
                         declarator = declarator.base
+                    #TODO(haoyu) These code is causing problem for closure inside cdef
                     code.putln('%s = %s->%s;' % (arg.cname, Naming.optional_args_cname, self.type.opt_arg_cname(declarator.name)))
                     i += 1
             for _ in range(self.type.optional_arg_count):
@@ -2338,21 +2339,26 @@ class DefNode(FuncDefNode):
             code.put_label(end_label)
 
     def generate_arg_assignment(self, arg, item, code):
+        entry = arg.entry
         if arg.type.is_pyobject:
             if arg.is_generic:
                 item = PyrexTypes.typecast(arg.type, PyrexTypes.py_object_type, item)
-            entry = arg.entry
-            code.putln("%s = %s;" % (entry.cname, item))
             if entry.in_closure:
-                code.put_var_incref(entry)
+                code.put_incref(item, arg.type)
+                code.putln("%s = %s;" % (entry.cname, item))
+                code.put_var_giveref(entry)
+            else:
+                code.putln("%s = %s;" % (entry.cname, item))
         else:
             func = arg.type.from_py_function
             if func:
                 code.putln("%s = %s(%s); %s" % (
-                    arg.entry.cname,
+                    entry.cname,
                     func,
                     item,
-                    code.error_goto_if(arg.type.error_condition(arg.entry.cname), arg.pos)))
+                    code.error_goto_if(arg.type.error_condition(entry.cname), arg.pos)))
+                if entry.in_closure:
+                    code.put_var_giveref(entry)
             else:
                 error(arg.pos, "Cannot convert Python object argument to type '%s'" % arg.type)
     
@@ -2749,9 +2755,12 @@ class DefNode(FuncDefNode):
             if arg.needs_conversion:
                 self.generate_arg_conversion(arg, code)
             elif arg.entry.in_closure:
-                code.putln('%s = %s;' % (arg.entry.cname, arg.hdr_cname))
                 if arg.type.is_pyobject:
-                    code.put_var_incref(arg.entry)
+                    code.put_incref(arg.hdr_cname, arg.type)
+                    code.putln('%s = %s;' % (arg.entry.cname, arg.hdr_cname))
+                    code.put_var_giveref(arg.entry)
+                else:
+                    code.putln('%s = %s;' % (arg.entry.cname, arg.hdr_cname))
 
     def generate_arg_conversion(self, arg, code):
         # Generate conversion code for one argument.
@@ -3193,6 +3202,23 @@ class GlobalNode(StatNode):
         pass
 
 
+class NonlocalNode(StatNode):
+    # Nonlocal variable declaration via the 'nonlocal' keyword.
+    #
+    # names    [string]
+    
+    child_attrs = []
+
+    def analyse_declarations(self, env):
+        for name in self.names:
+            env.declare_nonlocal(name, self.pos)
+
+    def analyse_expressions(self, env):
+        pass
+    
+    def generate_execution_code(self, code):
+        pass
+
 class ExprStatNode(StatNode):
     #  Expression used as a statement.
     #
@@ -3490,7 +3516,7 @@ class InPlaceAssignmentNode(AssignmentNode):
         import ExprNodes
         if self.lhs.type.is_pyobject:
             self.rhs = self.rhs.coerce_to_pyobject(env)
-        elif self.rhs.type.is_pyobject:
+        elif self.rhs.type.is_pyobject or (self.lhs.type.is_numeric and self.rhs.type.is_numeric):
             self.rhs = self.rhs.coerce_to(self.lhs.type, env)
         if self.lhs.type.is_pyobject:
             self.result_value_temp = ExprNodes.PyTempNode(self.pos, env)
@@ -3578,7 +3604,7 @@ class InPlaceAssignmentNode(AssignmentNode):
                                              indices = indices,
                                              is_temp = self.dup.is_temp)
         else:
-            assert False
+            assert False, "Unsupported node: %s" % type(self.lhs)
         self.lhs = target_lhs
         return self.dup
     
@@ -3879,8 +3905,9 @@ class RaiseStatNode(StatNode):
     #  exc_type    ExprNode or None
     #  exc_value   ExprNode or None
     #  exc_tb      ExprNode or None
+    #  cause       ExprNode or None
     
-    child_attrs = ["exc_type", "exc_value", "exc_tb"]
+    child_attrs = ["exc_type", "exc_value", "exc_tb", "cause"]
 
     def analyse_expressions(self, env):
         if self.exc_type:
@@ -3892,6 +3919,9 @@ class RaiseStatNode(StatNode):
         if self.exc_tb:
             self.exc_tb.analyse_types(env)
             self.exc_tb = self.exc_tb.coerce_to_pyobject(env)
+        if self.cause:
+            self.cause.analyse_types(env)
+            self.cause = self.cause.coerce_to_pyobject(env)
         env.use_utility_code(raise_utility_code)
 
     nogil_check = Node.gil_error
@@ -3913,12 +3943,18 @@ class RaiseStatNode(StatNode):
             tb_code = self.exc_tb.py_result()
         else:
             tb_code = "0"
+        if self.cause:
+            self.cause.generate_evaluation_code(code)
+            cause_code = self.cause.py_result()
+        else:
+            cause_code = "0"
         code.putln(
-            "__Pyx_Raise(%s, %s, %s);" % (
+            "__Pyx_Raise(%s, %s, %s, %s);" % (
                 type_code,
                 value_code,
-                tb_code))
-        for obj in (self.exc_type, self.exc_value, self.exc_tb):
+                tb_code,
+                cause_code))
+        for obj in (self.exc_type, self.exc_value, self.exc_tb, self.cause):
             if obj:
                 obj.generate_disposal_code(code)
                 obj.free_temps(code)
@@ -3932,6 +3968,8 @@ class RaiseStatNode(StatNode):
             self.exc_value.generate_function_definitions(env, code)
         if self.exc_tb is not None:
             self.exc_tb.generate_function_definitions(env, code)
+        if self.cause is not None:
+            self.cause.generate_function_definitions(env, code)
 
     def annotate(self, code):
         if self.exc_type:
@@ -3940,6 +3978,8 @@ class RaiseStatNode(StatNode):
             self.exc_value.annotate(code)
         if self.exc_tb:
             self.exc_tb.annotate(code)
+        if self.cause:
+            self.cause.annotate(code)
 
 
 class ReraiseStatNode(StatNode):
@@ -5547,11 +5587,12 @@ static CYTHON_INLINE void __Pyx_ErrFetch(PyObject **type, PyObject **value, PyOb
 
 raise_utility_code = UtilityCode(
 proto = """
-static void __Pyx_Raise(PyObject *type, PyObject *value, PyObject *tb); /*proto*/
+static void __Pyx_Raise(PyObject *type, PyObject *value, PyObject *tb, PyObject *cause); /*proto*/
 """,
 impl = """
 #if PY_MAJOR_VERSION < 3
-static void __Pyx_Raise(PyObject *type, PyObject *value, PyObject *tb) {
+static void __Pyx_Raise(PyObject *type, PyObject *value, PyObject *tb, PyObject *cause) {
+    /* cause is unused */
     Py_XINCREF(type);
     Py_XINCREF(value);
     Py_XINCREF(tb);
@@ -5618,7 +5659,7 @@ raise_error:
 
 #else /* Python 3+ */
 
-static void __Pyx_Raise(PyObject *type, PyObject *value, PyObject *tb) {
+static void __Pyx_Raise(PyObject *type, PyObject *value, PyObject *tb, PyObject *cause) {
     if (tb == Py_None) {
         tb = 0;
     } else if (tb && !PyTraceBack_Check(tb)) {
@@ -5641,6 +5682,31 @@ static void __Pyx_Raise(PyObject *type, PyObject *value, PyObject *tb) {
         PyErr_SetString(PyExc_TypeError,
             "raise: exception class must be a subclass of BaseException");
         goto bad;
+    }
+
+    if (cause) {
+        PyObject *fixed_cause;
+        if (PyExceptionClass_Check(cause)) {
+            fixed_cause = PyObject_CallObject(cause, NULL);
+            if (fixed_cause == NULL)
+                goto bad;
+        }
+        else if (PyExceptionInstance_Check(cause)) {
+            fixed_cause = cause;
+            Py_INCREF(fixed_cause);
+        }
+        else {
+            PyErr_SetString(PyExc_TypeError,
+                            "exception causes must derive from "
+                            "BaseException");
+            goto bad;
+        }
+
+        if (!value) {
+            value = PyObject_CallObject(type, NULL);
+        }
+
+        PyException_SetCause(value, fixed_cause);
     }
 
     PyErr_SetObject(type, value);
