@@ -1596,10 +1596,11 @@ class BackquoteNode(ExprNode):
 class ImportNode(ExprNode):
     #  Used as part of import statement implementation.
     #  Implements result = 
-    #    __import__(module_name, globals(), None, name_list)
+    #    __import__(module_name, globals(), None, name_list, level)
     #
     #  module_name   StringNode            dotted name of module
     #  name_list     ListNode or None      list of names to be imported
+    #  level         int                   relative import level
     
     type = py_object_type
     
@@ -1622,10 +1623,11 @@ class ImportNode(ExprNode):
         else:
             name_list_code = "0"
         code.putln(
-            "%s = __Pyx_Import(%s, %s); %s" % (
+            "%s = __Pyx_Import(%s, %s, %d); %s" % (
                 self.result(),
                 self.module_name.py_result(),
                 name_list_code,
+                self.level,
                 code.error_goto_if_null(self.result(), self.pos)))
         code.put_gotref(self.py_result())
 
@@ -6815,16 +6817,17 @@ static PyObject *__Pyx_GetName(PyObject *dict, PyObject *name) {
 
 import_utility_code = UtilityCode(
 proto = """
-static PyObject *__Pyx_Import(PyObject *name, PyObject *from_list); /*proto*/
+static PyObject *__Pyx_Import(PyObject *name, PyObject *from_list, long level); /*proto*/
 """,
 impl = """
-static PyObject *__Pyx_Import(PyObject *name, PyObject *from_list) {
+static PyObject *__Pyx_Import(PyObject *name, PyObject *from_list, long level) {
     PyObject *py_import = 0;
     PyObject *empty_list = 0;
     PyObject *module = 0;
     PyObject *global_dict = 0;
     PyObject *empty_dict = 0;
     PyObject *list;
+    PyObject *py_level = 0;
     py_import = __Pyx_GetAttrString(%(BUILTINS)s, "__import__");
     if (!py_import)
         goto bad;
@@ -6842,8 +6845,11 @@ static PyObject *__Pyx_Import(PyObject *name, PyObject *from_list) {
     empty_dict = PyDict_New();
     if (!empty_dict)
         goto bad;
+    py_level = PyInt_FromLong(level);
+    if (!py_level)
+        goto bad;
     module = PyObject_CallFunctionObjArgs(py_import,
-        name, global_dict, empty_dict, list, NULL);
+        name, global_dict, empty_dict, list, py_level, NULL);
 bad:
     Py_XDECREF(empty_list);
     Py_XDECREF(py_import);
