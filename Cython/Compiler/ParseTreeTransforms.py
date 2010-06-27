@@ -834,6 +834,37 @@ class InterpretCompilerDirectives(CythonTransform, SkipDeclarations):
             return self.visit_with_directives(node.body, directive_dict)
         return self.visit_Node(node)
 
+class ExceptTransform(CythonTransform, SkipDeclarations):
+    # Transform the except clause body by following the PEP3110 sematic
+    # of excpetion catching
+    # XXX(haoyu) There should be 'del EXC' but del is not supported yet
+    template = TreeFragment(u"""
+        try:
+            BODY
+        finally:
+            EXC = None
+            #del EXC
+    """, pipeline=[NormalizeTree(None)])
+
+    def visit_ModuleNode(self, node):
+        if node.directives['language_level']==3:
+            # Only do this tranform for Python 3
+            self.visitchildren(node)
+        return node
+    
+    def visit_ExceptClauseNode(self, node):
+        new_body = self.template.substitute({
+                u'BODY': node.body,
+                u'EXC': node.target,
+            }, pos=node.pos)
+        node.body = new_body
+        self.visitchildren(node)
+        return node
+
+    def visit_ExprNode(self, node):
+        # Except statements are never inside expressions.
+        return node
+
 class WithTransform(CythonTransform, SkipDeclarations):
 
     # EXCINFO is manually set to a variable that contains
