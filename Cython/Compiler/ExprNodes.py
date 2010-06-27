@@ -7029,11 +7029,13 @@ static PyObject *__Pyx_Import(PyObject *name, PyObject *from_list, long level) {
     if (!empty_dict)
         goto bad;
     #if PY_VERSION_HEX >= 0x02050000
-    PyObject *py_level = PyInt_FromLong(level);
-    if (!py_level)
-        goto bad;
-    module = PyObject_CallFunctionObjArgs(py_import,
-        name, global_dict, empty_dict, list, py_level, NULL);
+    {
+        PyObject *py_level = PyInt_FromLong(level);
+        if (!py_level)
+            goto bad;
+        module = PyObject_CallFunctionObjArgs(py_import,
+            name, global_dict, empty_dict, list, py_level, NULL);
+    }
     #else
     if (level>0) {
         PyErr_SetString(PyExc_RuntimeError, "Relative import is not supported for Python <=2.4.");
