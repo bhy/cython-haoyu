@@ -53,11 +53,11 @@ VER_DEP_MODULES = {
     # (2,4) : (operator.le, ...) excludes ... when PyVer <= 2.4.x
     (2,5) : (operator.lt, lambda x: x in ['run.any',
                                           'run.all',
-                                          'run.relativeimport_T542',
                                           ]),
     (2,4) : (operator.le, lambda x: x in ['run.extern_builtins_T258'
                                           ]),
     (2,6) : (operator.lt, lambda x: x in ['run.print_function',
+                                          'run.relativeimport_T542',
                                           'run.cython3',
                                           ]),
     # The next line should start (3,); but this is a dictionary, so
