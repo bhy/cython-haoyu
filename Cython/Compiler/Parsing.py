@@ -497,20 +497,16 @@ def p_subscript(s):
     # 1, 2 or 3 ExprNodes, depending on how
     # many slice elements were encountered.
     pos = s.position()
-    if s.sy == '.':
-        expect_ellipsis(s)
-        return [ExprNodes.EllipsisNode(pos)]
-    else:
-        start = p_slice_element(s, (':',))
-        if s.sy != ':':
-            return [start]
-        s.next()
-        stop = p_slice_element(s, (':', ',', ']'))
-        if s.sy != ':':
-            return [start, stop]
-        s.next()
-        step = p_slice_element(s, (':', ',', ']'))
-        return [start, stop, step]
+    start = p_slice_element(s, (':',))
+    if s.sy != ':':
+        return [start]
+    s.next()
+    stop = p_slice_element(s, (':', ',', ']'))
+    if s.sy != ':':
+        return [start, stop]
+    s.next()
+    step = p_slice_element(s, (':', ',', ']'))
+    return [start, stop, step]
 
 def p_slice_element(s, follow_set):
     # Simple expression which may be missing iff
@@ -569,6 +565,9 @@ def p_atom(s):
         return p_dict_or_set_maker(s)
     elif sy == '`':
         return p_backquote_expr(s)
+    elif sy == '.':
+        expect_ellipsis(s)
+        return ExprNodes.EllipsisNode(pos)
     elif sy == 'INT':
         value = s.systring
         s.next()
@@ -777,7 +776,7 @@ def p_list_maker(s):
         target = ExprNodes.ListNode(pos, args = [])
         append = ExprNodes.ComprehensionAppendNode(
             pos, expr=expr, target=ExprNodes.CloneNode(target))
-        loop = p_comp_for(s, Nodes.ExprStatNode(append.pos, expr=append))
+        loop = p_comp_for(s, append)
         s.expect(']')
         return ExprNodes.ComprehensionNode(
             pos, loop=loop, append=append, target=target)
@@ -843,7 +842,7 @@ def p_dict_or_set_maker(s):
         target = ExprNodes.SetNode(pos, args=[])
         append = ExprNodes.ComprehensionAppendNode(
             item.pos, expr=item, target=ExprNodes.CloneNode(target))
-        loop = p_comp_for(s, Nodes.ExprStatNode(append.pos, expr=append))
+        loop = p_comp_for(s, append)
         s.expect('}')
         return ExprNodes.ComprehensionNode(
             pos, loop=loop, append=append, target=target)
@@ -858,7 +857,7 @@ def p_dict_or_set_maker(s):
             append = ExprNodes.DictComprehensionAppendNode(
                 item.pos, key_expr=key, value_expr=value,
                 target=ExprNodes.CloneNode(target))
-            loop = p_comp_for(s, Nodes.ExprStatNode(append.pos, expr=append))
+            loop = p_comp_for(s, append)
             s.expect('}')
             return ExprNodes.ComprehensionNode(
                 pos, loop=loop, append=append, target=target)
@@ -1101,6 +1100,7 @@ def p_raise_statement(s):
     exc_type = None
     exc_value = None
     exc_tb = None
+    cause = None
     if s.sy not in statement_terminators:
         exc_type = p_test(s)
         if s.sy == ',':
@@ -1109,15 +1109,19 @@ def p_raise_statement(s):
             if s.sy == ',':
                 s.next()
                 exc_tb = p_test(s)
+        elif s.sy == 'from':
+            s.next()
+            cause = p_test(s)
     if exc_type or exc_value or exc_tb:
         return Nodes.RaiseStatNode(pos, 
             exc_type = exc_type,
             exc_value = exc_value,
-            exc_tb = exc_tb)
+            exc_tb = exc_tb,
+            cause = cause)
     else:
         return Nodes.ReraiseStatNode(pos)
 
-def p_import_statement(s):
+def p_import_statement(s, level=-1):
     # s.sy in ('import', 'cimport')
     pos = s.position()
     kind = s.sy
@@ -1145,6 +1149,7 @@ def p_import_statement(s):
                 rhs = ExprNodes.ImportNode(pos, 
                     module_name = ExprNodes.IdentifierStringNode(
                         pos, value = dotted_name),
+                    level = level,
                     name_list = name_list))
         stats.append(stat)
     return Nodes.StatListNode(pos, stats = stats)
@@ -1153,8 +1158,21 @@ def p_from_import_statement(s, first_statement = 0):
     # s.sy == 'from'
     pos = s.position()
     s.next()
+    if s.sy == '.':
+        level = 0
+        while s.sy=='.':
+            level += 1
+            s.next()
+    else:
+        level = -1 # attempt both relative and absolute import by default
+
+    if level>0 and s.sy=='import':
+        return p_import_statement(s, level=level)
+
     (dotted_name_pos, _, dotted_name, _) = \
         p_dotted_name(s, as_allowed = 0)
+    if level>0 and s.sy=='cimport':
+        s.error("Relative cimport is not supported")
     if s.sy in ('import', 'cimport'):
         kind = s.sy
         s.next()
@@ -1214,6 +1232,7 @@ def p_from_import_statement(s, first_statement = 0):
         return Nodes.FromImportStatNode(pos,
             module = ExprNodes.ImportNode(dotted_name_pos,
                 module_name = ExprNodes.IdentifierStringNode(pos, value = dotted_name),
+                level = level,
                 name_list = import_list),
             items = items)
 
@@ -1314,7 +1333,7 @@ def p_for_bounds(s, allow_testlist=True):
         s.next()
         iterator = p_for_iterator(s, allow_testlist)
         return { 'target': target, 'iterator': iterator }
-    else:
+    elif not s.in_python_file:
         if s.sy == 'from':
             s.next()
             bound1 = p_bit_expr(s)
@@ -1346,6 +1365,9 @@ def p_for_bounds(s, allow_testlist=True):
                 'relation2': rel2,
                 'bound2': bound2,
                 'step': step }
+    else:
+        s.expect('in')
+        return {}
 
 def p_for_from_relation(s):
     if s.sy in inequality_relations:
@@ -1463,50 +1485,62 @@ def p_include_statement(s, ctx):
         return Nodes.PassStatNode(pos)
 
 def p_with_statement(s):
-    pos = s.position()
     s.next() # 'with'
-#    if s.sy == 'IDENT' and s.systring in ('gil', 'nogil'):
+    if s.systring == 'template':
+        node = p_with_template(s)
+    else:
+        node = p_with_items(s)
+    return node
+
+def p_with_items(s):
+    pos = s.position()
     if s.sy == 'IDENT' and s.systring == 'nogil':
         state = s.systring
         s.next()
-        body = p_suite(s)
-        return Nodes.GILStatNode(pos, state = state, body = body)
-    elif s.systring == 'template':
-        templates = []
-        s.next()
-        s.expect('[')
-        #s.next()
-        templates.append(s.systring)
-        s.next()
-        while s.systring == ',':
+        if s.sy == ',':
             s.next()
-            templates.append(s.systring)
-            s.next()
-        s.expect(']')
-        if s.sy == ':':
-            s.next()
-            s.expect_newline("Syntax error in template function declaration")
-            s.expect_indent()
-            body_ctx = Ctx()
-            body_ctx.templates = templates
-            func_or_var = p_c_func_or_var_declaration(s, pos, body_ctx)
-            s.expect_dedent()
-            return func_or_var
+            body = p_with_items(s)
         else:
-            error(pos, "Syntax error in template function declaration")
+            body = p_suite(s)
+        return Nodes.GILStatNode(pos, state = state, body = body)
     else:
         manager = p_test(s)
         target = None
         if s.sy == 'IDENT' and s.systring == 'as':
             s.next()
-            allow_multi = (s.sy == '(')
-            target = p_target(s, ':')
-            if not allow_multi and isinstance(target, ExprNodes.TupleNode):
-                s.error("Multiple with statement target values not allowed without paranthesis")
-        body = p_suite(s)
+            target = p_starred_expr(s)
+        if s.sy == ',':
+            s.next()
+            body = p_with_items(s)
+        else:
+            body = p_suite(s)
     return Nodes.WithStatNode(pos, manager = manager, 
                               target = target, body = body)
-    
+
+def p_with_template(s):
+    pos = s.position()
+    templates = []
+    s.next()
+    s.expect('[')
+    templates.append(s.systring)
+    s.next()
+    while s.systring == ',':
+        s.next()
+        templates.append(s.systring)
+        s.next()
+    s.expect(']')
+    if s.sy == ':':
+        s.next()
+        s.expect_newline("Syntax error in template function declaration")
+        s.expect_indent()
+        body_ctx = Ctx()
+        body_ctx.templates = templates
+        func_or_var = p_c_func_or_var_declaration(s, pos, body_ctx)
+        s.expect_dedent()
+        return func_or_var
+    else:
+        error(pos, "Syntax error in template function declaration")
+
 def p_simple_statement(s, first_statement = 0):
     #print "p_simple_statement:", s.sy, s.systring ###
     if s.sy == 'global':
@@ -1649,7 +1683,7 @@ def p_statement(s, ctx, first_statement = 0):
         return node
     else:
         if ctx.api:
-            error(s.pos, "'api' not allowed with this statement")
+            s.error("'api' not allowed with this statement")
         elif s.sy == 'def':
             # def statements aren't allowed in pxd files, except
             # as part of a cdef class
@@ -1712,7 +1746,7 @@ def p_suite(s, ctx = Ctx(), with_doc = 0, with_pseudo_doc = 0):
         s.expect_dedent()
     else:
         if ctx.api:
-            error(s.pos, "'api' not allowed with this statement")
+            s.error("'api' not allowed with this statement")
         if ctx.level in ('module', 'class', 'function', 'other'):
             body = p_simple_statement_list(s, ctx)
         else:
@@ -2436,7 +2470,7 @@ def p_c_func_or_var_declaration(s, pos, ctx):
             overridable = ctx.overridable)
     else:
         #if api:
-        #    error(s.pos, "'api' not allowed with variable declaration")
+        #    s.error("'api' not allowed with variable declaration")
         declarators = [declarator]
         while s.sy == ',':
             s.next()
@@ -2710,6 +2744,9 @@ def p_module(s, pxd, full_module_name):
 
     directive_comments = p_compiler_directive_comments(s)
     s.parse_comments = False
+
+    if 'language_level' in directive_comments:
+        s.context.set_language_level(directive_comments['language_level'])
 
     doc = p_doc_string(s)
     if pxd:

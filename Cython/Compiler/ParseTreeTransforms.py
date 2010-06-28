@@ -834,6 +834,37 @@ class InterpretCompilerDirectives(CythonTransform, SkipDeclarations):
             return self.visit_with_directives(node.body, directive_dict)
         return self.visit_Node(node)
 
+class ExceptTransform(CythonTransform, SkipDeclarations):
+    # Transform the except clause body by following the PEP3110 sematic
+    # of excpetion catching
+    # XXX(haoyu) There should be 'del EXC' but del is not supported yet
+    template = TreeFragment(u"""
+        try:
+            BODY
+        finally:
+            EXC = None
+            #del EXC
+    """, pipeline=[NormalizeTree(None)])
+
+    def visit_ModuleNode(self, node):
+        if node.directives['language_level']==3:
+            # Only do this tranform for Python 3
+            self.visitchildren(node)
+        return node
+    
+    def visit_ExceptClauseNode(self, node):
+        new_body = self.template.substitute({
+                u'BODY': node.body,
+                u'EXC': node.target,
+            }, pos=node.pos)
+        node.body = new_body
+        self.visitchildren(node)
+        return node
+
+    def visit_ExprNode(self, node):
+        # Except statements are never inside expressions.
+        return node
+
 class WithTransform(CythonTransform, SkipDeclarations):
 
     # EXCINFO is manually set to a variable that contains
@@ -1030,9 +1061,16 @@ property NAME:
         node.analyse_declarations(self.env_stack[-1])
         return node
 
-    def visit_GeneratorExpressionNode(self, node):
-        self.visitchildren(node)
+    def visit_ScopedExprNode(self, node):
         node.analyse_declarations(self.env_stack[-1])
+        if self.seen_vars_stack:
+            self.seen_vars_stack.append(set(self.seen_vars_stack[-1]))
+        else:
+            self.seen_vars_stack.append(set())
+        self.env_stack.append(node.expr_scope)
+        self.visitchildren(node)
+        self.env_stack.pop()
+        self.seen_vars_stack.pop()
         return node
 
     def visit_TempResultFromStatNode(self, node):
@@ -1131,6 +1169,13 @@ class AnalyseExpressionsTransform(CythonTransform):
     def visit_FuncDefNode(self, node):
         node.local_scope.infer_types()
         node.body.analyse_expressions(node.local_scope)
+        self.visitchildren(node)
+        return node
+
+    def visit_ScopedExprNode(self, node):
+        if node.expr_scope is not None:
+            node.expr_scope.infer_types()
+            node.analyse_scoped_expressions(node.expr_scope)
         self.visitchildren(node)
         return node
         

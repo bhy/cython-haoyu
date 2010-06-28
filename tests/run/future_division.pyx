@@ -2,16 +2,31 @@ from __future__ import division
 
 def doit(x,y):
     """
-    >>> doit(1,2)
-    (0.5, 0)
-    >>> doit(4,3)
-    (1.3333333333333333, 1)
-    >>> doit(4,3.0)
-    (1.3333333333333333, 1.0)
-    >>> doit(4,2)
-    (2.0, 2)
+    >>> doit(1,2) == (1.0/2.0, 0)
+    True
+    >>> doit(4,3) == (4.0/3.0, 1)
+    True
+    >>> doit(4,3.0) == (4.0/3.0, 1.0)
+    True
+    >>> doit(4,2) == (4.0/2.0, 2)
+    True
     """
     return x/y, x//y
+
+def cdoit(int x, int y):
+    """
+    >>> cdoit(1,2) == (1.0/2.0, 0)
+    True
+    >>> cdoit(4,3) == (4.0/3.0, 1)
+    True
+    >>> cdoit(4,3.0) == (4.0/3.0, 1.0)
+    True
+    >>> cdoit(4,2) == (4.0/2.0, 2)
+    True
+    """
+    cdef double a = x/y
+    cdef double b = x//y
+    return a, b
 
 def doit_inplace(x,y):
     """
