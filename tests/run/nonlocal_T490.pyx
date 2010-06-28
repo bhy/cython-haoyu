@@ -1,6 +1,6 @@
 def simple():
     """
-    >>> simple() 
+    >>> simple()
     1
     2
     """
@@ -15,7 +15,7 @@ def simple():
 
 def assign():
     """
-    >>> assign() 
+    >>> assign()
     1
     """
     xx = 0
@@ -27,7 +27,7 @@ def assign():
 
 def nested():
     """
-    >>> nested() 
+    >>> nested()
     1
     """
     x = 0
