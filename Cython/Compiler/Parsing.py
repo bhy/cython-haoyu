@@ -1016,7 +1016,6 @@ def p_nonlocal_statement(s):
     pos = s.position()
     s.next()
     names = p_ident_list(s)
-    #TODO(bhy)
     return Nodes.NonlocalNode(pos, names = names)
 
 def p_expression_or_assignment(s):
