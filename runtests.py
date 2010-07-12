@@ -188,22 +188,23 @@ class TestBuilder(object):
                     test_class = CythonRunTestCase
             else:
                 test_class = CythonCompileTestCase
-            for test in self.build_tests(test_class, path, workdir,
+            for test in self.build_tests(test_class, path, workdir, filename,
                                          module, expect_errors):
                 suite.addTest(test)
         return suite
 
-    def build_tests(self, test_class, path, workdir, module, expect_errors):
+    def build_tests(self, test_class, path, workdir, filename, module, expect_errors):
         if expect_errors:
             if 'cpp' in module and 'cpp' in self.languages:
                 languages = ['cpp']
             else:
                 languages = self.languages[:1]
         else:
-            languages = self.languages
+            languages = list(self.languages)
         if 'cpp' in module and 'c' in languages:
-            languages = list(languages)
             languages.remove('c')
+        if not filename.endswith('.py') and 'py' in languages:
+            languages.remove('py')
         tests = [ self.build_test(test_class, path, workdir, module,
                                   language, expect_errors)
                   for language in languages ]
@@ -286,7 +287,7 @@ class CythonCompileTestCase(unittest.TestCase):
 
     def find_module_source_file(self, source_file):
         if not os.path.exists(source_file):
-            source_file = source_file[:-1]
+            source_file = source_file[:-1] # .pyx or .py
         return source_file
 
     def build_target_filename(self, module_name):
@@ -333,20 +334,26 @@ class CythonCompileTestCase(unittest.TestCase):
         source = self.find_module_source_file(
             os.path.join(test_directory, module + '.pyx'))
         target = os.path.join(targetdir, self.build_target_filename(module))
-        options = CompilationOptions(
-            pyrex_default_options,
-            include_path = include_dirs,
-            output_file = target,
-            annotate = annotate,
-            use_listing_file = False,
-            cplus = self.language == 'cpp',
-            generate_pxi = False,
-            evaluate_tree_assertions = True,
-            )
-        cython_compile(source, options=options,
-                       full_module_name=module)
+        if self.language=='py':
+            # Simply copy Python source code
+            shutil.copy(source, target)
+        else:
+            options = CompilationOptions(
+                pyrex_default_options,
+                include_path = include_dirs,
+                output_file = target,
+                annotate = annotate,
+                use_listing_file = False,
+                cplus = self.language == 'cpp',
+                generate_pxi = False,
+                evaluate_tree_assertions = True,
+                )
+            cython_compile(source, options=options,
+                           full_module_name=module)
 
     def run_distutils(self, test_directory, module, workdir, incdir):
+        if self.language=='py':
+            return
         cwd = os.getcwd()
         os.chdir(workdir)
         try:
@@ -797,6 +804,9 @@ if __name__ == '__main__':
     parser.add_option("--no-cpp", dest="use_cpp",
                       action="store_false", default=True,
                       help="do not test C++ compilation")
+    parser.add_option("--no-python", dest="use_py",
+                      action="store_false", default=True,
+                      help="do not test pure Python test cases without compilation")
     parser.add_option("--no-unit", dest="unittests",
                       action="store_false", default=True,
                       help="do not run the unit tests")
@@ -965,6 +975,8 @@ if __name__ == '__main__':
         languages.append('c')
     if options.use_cpp:
         languages.append('cpp')
+    if options.use_py:
+        languages.append('py')
 
     test_suite = unittest.TestSuite()
 
