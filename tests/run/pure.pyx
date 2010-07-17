@@ -1,7 +1,3 @@
-"""
->>> import cython
->>> cython.__file__
-"""
 import cython
 
 def test_sizeof():

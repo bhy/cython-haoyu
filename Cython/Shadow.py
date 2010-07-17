@@ -1,5 +1,7 @@
 compiled = False
 
+_Unspecified = object()
+
 def empty_decorator(x):
     return x
 
@@ -22,11 +24,11 @@ def cmod(a, b):
 
 # Emulated language constructs
 
-def cast(type, arg):
+def cast(type, *arg):
     if hasattr(type, '__call__'):
-        return type(arg)
+        return type(*arg)
     else:
-        return arg
+        return arg[0]
 
 def sizeof(arg):
     return 1
@@ -37,9 +39,9 @@ def typeof(arg):
 def address(arg):
     return pointer(type(arg))([arg])
     
-def declare(type=None, value=None, **kwds):
+def declare(type=None, value=_Unspecified, **kwds):
     if type is not None and hasattr(type, '__call__'):
-        if value:
+        if value is not _Unspecified:
             return type(value)
         else:
             return type()
@@ -48,28 +50,33 @@ def declare(type=None, value=None, **kwds):
 
 # Emulated types
 
-class CythonType(object):
+class CythonMetaType(type):
+
+    def __getitem__(type, ix):
+        return array(type, ix)
+
+CythonTypeObject = CythonMetaType('CythonTypeObject', (object,), {})
+
+class CythonType(CythonTypeObject):
 
     def _pointer(self, n=1):
         for i in range(n):
             self = pointer(self)
         return self
 
-    def __getitem__(self, ix):
-        return array(self, ix)
 
 
 class PointerType(CythonType):
 
     def __init__(self, value=None):
-        if isinstance(value, ArrayType):
+        if isinstance(value, (ArrayType, PointerType)):
             self._items = [cast(self._basetype, a) for a in value._items]
         elif isinstance(value, list):
             self._items = [cast(self._basetype, a) for a in value]
         elif value is None:
             self._items = []
         else:
-            raise ValueError
+            raise ValueError((value, self.__class__))
             
     def __getitem__(self, ix):
         if ix < 0:
@@ -80,6 +87,15 @@ class PointerType(CythonType):
         if ix < 0:
             raise IndexError("negative indexing not allowed in C")
         self._items[ix] = cast(self._basetype, value)
+
+    def __eq__(self, value):
+        if value is None and not self._items:
+            return True
+        elif type(self) <> type(value):
+            return False
+        else:
+            return self._items == value._items
+
         
 class ArrayType(PointerType):
     
@@ -89,9 +105,18 @@ class ArrayType(PointerType):
 
 class StructType(CythonType):
     
-    def __init__(self, **data):
-        for key, value in data.iteritems():
-            setattr(self, key, value)
+    def __init__(self, cast_from=_Unspecified, **data):
+        if cast_from is not _Unspecified:
+            # do cast
+            if len(data) > 0:
+                raise ValueError('Cannot accept keyword arguments when casting.')
+            if type(cast_from) is not type(self):
+                raise ValueError('Cannot cast from %s'%cast_from)
+            for key, value in cast_from.__dict__.items():
+                setattr(self, key, value)
+        else:
+            for key, value in data.iteritems():
+                setattr(self, key, value)
             
     def __setattr__(self, key, value):
         if key in self._members:
@@ -102,14 +127,28 @@ class StructType(CythonType):
 
 class UnionType(CythonType):
 
-    def __init__(self, **data):
-        if len(data) > 0:
-            raise AttributeError("Union can only store one field at a time.")
-        for key, value in data.iteritems():
-            setattr(self, key, value)
+    def __init__(self, cast_from=_Unspecified, **data):
+        if cast_from is not _Unspecified:
+            # do cast
+            # TODO refactor this two
+            if len(data) > 0:
+                raise ValueError('Cannot accept keyword arguments when casting.')
+            if isinstance(cast_from, dict):
+                castdict = cast_from
+            elif type(cast_from) is type(self):
+                castdict = cast_from.__dict__
+            else:
+                raise ValueError('Cannot cast from %s'%cast_from)
+            for key, value in castdict.items():
+                setattr(self, key, value)
+        else:
+            if len(data) > 1:
+                raise AttributeError("Union can only store one field at a time.")
+            for key, value in data.iteritems():
+                setattr(self, key, value)
             
     def __setattr__(self, key, value):
-        if key in '__dict__':
+        if key == '__dict__':
             CythonType.__setattr__(self, key, value)
         elif key in self._members:
             self.__dict__ = {key: cast(self._members[key], value)}
@@ -146,9 +185,8 @@ class typedef(CythonType):
     def __init__(self, type):
         self._basetype = type
     
-    def __call__(self, value=None):
-        if value is not None:
-            value = cast(self._basetype, value)
+    def __call__(self, *arg):
+        value = cast(self._basetype, *arg)
         return value
         
 
@@ -202,3 +240,4 @@ for t in int_types + float_types + complex_types + other_types:
 
 void = typedef(None)
 NULL = None
+
