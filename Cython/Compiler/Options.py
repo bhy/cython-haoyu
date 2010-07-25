@@ -82,6 +82,7 @@ directive_defaults = {
 # Override types possibilities above, if needed
 directive_types = {
     'infer_types' : bool, # values can be True/None/False
+    'cfunc' : None, # decorators do not take directive value
     }
 
 for key, val in directive_defaults.items():

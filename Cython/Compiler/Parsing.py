@@ -1696,7 +1696,7 @@ def p_statement(s, ctx, first_statement = 0):
     elif s.sy == 'IF':
         return p_IF_statement(s, ctx)
     elif s.sy == 'DECORATOR':
-        if ctx.level not in ('module', 'class', 'c_class', 'function', 'property', 'module_pxd', 'c_class_pxd'):
+        if ctx.level not in ('module', 'class', 'c_class', 'function', 'property', 'module_pxd', 'c_class_pxd', 'other'):
             print ctx.level
             s.error('decorator not allowed here')
         s.level = ctx.level
