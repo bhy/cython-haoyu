@@ -723,7 +723,15 @@ class InterpretCompilerDirectives(CythonTransform, SkipDeclarations):
                             return directives
                     directives.append(self.try_to_parse_directive(optname, args, kwds, node.function.pos))
                     return directives
-                
+        elif isinstance(node, (AttributeNode, NameNode)):
+            self.visit(node)
+            optname = node.as_cython_attribute()
+            if optname:
+                directivetype = Options.directive_types.get(optname) 
+                if directivetype is not None:
+                    raise PostParseError(node.pos,
+                            'The %s directive should be used as a funciton call.' % optname)
+                return [(optname, None)]
         return None
 
     def try_to_parse_directive(self, optname, args, kwds, pos):
@@ -1177,6 +1185,35 @@ class AnalyseExpressionsTransform(CythonTransform):
             node.expr_scope.infer_types()
             node.analyse_scoped_expressions(node.expr_scope)
         self.visitchildren(node)
+        return node
+
+class AdjustDefByDirectives(CythonTransform, SkipDeclarations):
+    """
+    Adjust function and class definitions by the decorator directives:
+
+    @cython.cfunc
+    @cython.cclass
+    @cython.ccall
+    """
+
+    def visit_ModuleNode(self, node):
+        self.directives = node.directives
+        self.visitchildren(node)
+        return node
+
+    def visit_CompilerDirectivesNode(self, node):
+        old_directives = self.directives
+        self.directives = node.directives
+        self.visitchildren(node)
+        self.directives = old_directives
+        return node
+
+    def visit_DefNode(self, node):
+        if 'cfunc' in self.directives:
+            node = node.as_cfunction()
+            self.visit(node)
+        else:
+            self.visitchildren(node)
         return node
         
 class AlignFunctionDefinitions(CythonTransform):

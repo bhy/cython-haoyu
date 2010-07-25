@@ -2,11 +2,24 @@ compiled = False
 
 _Unspecified = object()
 
-def empty_decorator(x):
+def _empty_decorator(x):
     return x
 
 def locals(**arg_types):
-    return empty_decorator
+    return _empty_decorator
+
+def test_assert_path_exists(path):
+    return _empty_decorator
+
+class _EmptyDecoratorAndManager(object):
+    def __call__(self, x):
+        return x
+    def __enter__(self):
+        pass
+    def __exit__(self, exc_type, exc_value, traceback):
+        pass
+
+cfunc = _EmptyDecoratorAndManager()
 
 # Special functions
 
