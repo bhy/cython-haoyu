@@ -1236,6 +1236,9 @@ class AdjustDefByDirectives(CythonTransform, SkipDeclarations):
         return node
 
     def visit_DefNode(self, node):
+        if 'ccall' in self.directives:
+            node = node.as_cfunction(overridable=True)
+            self.visit(node)
         if 'cfunc' in self.directives:
             if self.in_py_class:
                 error(node.pos, "cfunc directive is not allowed here")
