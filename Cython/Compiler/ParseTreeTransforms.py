@@ -1220,10 +1220,11 @@ class AdjustDefByDirectives(CythonTransform, SkipDeclarations):
     @cython.cclass
     @cython.ccall
     """
+    #TODO(haoyu) Consider to merge this with AlignFunctionDefinitions?
 
     def visit_ModuleNode(self, node):
         self.directives = node.directives
-        self.in_c_class = False
+        self.in_py_class = False
         self.visitchildren(node)
         return node
 
@@ -1236,9 +1237,9 @@ class AdjustDefByDirectives(CythonTransform, SkipDeclarations):
 
     def visit_DefNode(self, node):
         if 'cfunc' in self.directives:
-            if self.scope.in_c_class:
+            if self.in_py_class:
                 error(node.pos, "cfunc directive is not allowed here")
-            node = node.as_cfunction()
+            node = node.as_cfunction(overridable=False)
             self.visit(node)
         else:
             self.visitchildren(node)
@@ -1248,16 +1249,18 @@ class AdjustDefByDirectives(CythonTransform, SkipDeclarations):
         if 'cclass' in self.directives:
             node = node.as_cclass()
             self.visit(node)
-            print node
         else:
+            old_in_py_class = self.in_py_class
+            self.in_py_class = True
             self.visitchildren(node)
+            self.in_py_class = old_in_py_class
         return node
 
     def visit_CClassDefNode(self, node):
-        old_in_c_class = self.in_c_class
-        self.in_c_class = True
+        old_in_py_class = self.in_py_class
+        self.in_py_class = False
         self.visitchildren(node)
-        self.in_c_class = old_in_c_class
+        self.in_py_class = old_in_py_class
         return node
         
 class AlignFunctionDefinitions(CythonTransform):
