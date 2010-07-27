@@ -83,6 +83,7 @@ directive_defaults = {
 directive_types = {
     'infer_types' : bool, # values can be True/None/False
     'cfunc' : None, # decorators do not take directive value
+    'cclass' : None, 
     }
 
 for key, val in directive_defaults.items():
@@ -92,8 +93,8 @@ for key, val in directive_defaults.items():
 directive_scopes = { # defaults to available everywhere
     # 'module', 'function', 'class', 'with statement'
     'autotestdict' : ('module',),
-    'test_assert_path_exists' : ('function',),
-    'test_fail_if_path_exists' : ('function',),
+    'test_assert_path_exists' : ('function', 'class'),
+    'test_fail_if_path_exists' : ('function', 'class'),
 }
 
 def parse_directive_value(name, value, relaxed_bool=False):

@@ -19,7 +19,7 @@ class _EmptyDecoratorAndManager(object):
     def __exit__(self, exc_type, exc_value, traceback):
         pass
 
-cfunc = _EmptyDecoratorAndManager()
+cclass = cfunc = _EmptyDecoratorAndManager()
 
 # Special functions
 
