@@ -540,6 +540,10 @@ class CFuncDeclaratorNode(CDeclaratorNode):
             if name_declarator.cname:
                 error(self.pos, 
                     "Function argument cannot have C name specification")
+            if not func_type_args and env.is_c_class_scope:
+                #fix the type of self
+                print type, env.parent_type
+                type = env.parent_type
             # Turn *[] argument into **
             if type.is_array:
                 type = PyrexTypes.c_ptr_type(type.base_type)

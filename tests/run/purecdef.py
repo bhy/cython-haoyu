@@ -34,3 +34,19 @@ def test_with():
     (3, 4)
     """
     return fwith1(1), fwith2(1)
+
+#@cython.test_assert_path_exists('//CClassDefNode')
+@cython.cclass
+class PureFoo(object):
+    #@cython.test_assert_path_exists('//CFuncDefNode')
+    @cython.cfunc
+    def puremeth(self, a):
+        return a*2
+
+def test_method():
+    """
+    >>> test_method()
+    4
+    """
+    x = PureFoo()
+    return x.puremeth(2)

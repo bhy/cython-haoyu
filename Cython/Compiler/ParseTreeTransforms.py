@@ -779,6 +779,12 @@ class InterpretCompilerDirectives(CythonTransform, SkipDeclarations):
  
     # Handle decorators
     def visit_FuncDefNode(self, node):
+        return self.visit_decorators(node)
+
+    def visit_PyClassDefNode(self, node):
+        return self.visit_decorators(node)
+
+    def visit_decorators(self, node):
         directives = []
         if node.decorators:
             # Split the decorators into two lists -- real decorators and directives
@@ -1217,6 +1223,7 @@ class AdjustDefByDirectives(CythonTransform, SkipDeclarations):
 
     def visit_ModuleNode(self, node):
         self.directives = node.directives
+        self.in_c_class = False
         self.visitchildren(node)
         return node
 
@@ -1229,10 +1236,28 @@ class AdjustDefByDirectives(CythonTransform, SkipDeclarations):
 
     def visit_DefNode(self, node):
         if 'cfunc' in self.directives:
+            if self.scope.in_c_class:
+                error(node.pos, "cfunc directive is not allowed here")
             node = node.as_cfunction()
             self.visit(node)
         else:
             self.visitchildren(node)
+        return node
+
+    def visit_PyClassDefNode(self, node):
+        if 'cclass' in self.directives:
+            node = node.as_cclass()
+            self.visit(node)
+            print node
+        else:
+            self.visitchildren(node)
+        return node
+
+    def visit_CClassDefNode(self, node):
+        old_in_c_class = self.in_c_class
+        self.in_c_class = True
+        self.visitchildren(node)
+        self.in_c_class = old_in_c_class
         return node
         
 class AlignFunctionDefinitions(CythonTransform):
