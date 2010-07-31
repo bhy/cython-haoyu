@@ -540,7 +540,7 @@ class CFuncDeclaratorNode(CDeclaratorNode):
             if name_declarator.cname:
                 error(self.pos, 
                     "Function argument cannot have C name specification")
-            if not func_type_args and env.is_c_class_scope:
+            if not func_type_args and env.is_c_class_scope and type.is_pyobject:
                 #fix the type of self
                 type = env.parent_type
             # Turn *[] argument into **
