@@ -59,6 +59,7 @@ VER_DEP_MODULES = {
     (2,6) : (operator.lt, lambda x: x in ['run.print_function',
                                           'run.relativeimport_T542',
                                           'run.cython3',
+                                          'run.purecdef',
                                           ]),
     (3,): (operator.ge, lambda x: x in ['run.non_future_division',
                                         'compile.extsetslice',
