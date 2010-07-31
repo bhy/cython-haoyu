@@ -104,7 +104,7 @@ class PointerType(CythonType):
     def __eq__(self, value):
         if value is None and not self._items:
             return True
-        elif type(self) <> type(value):
+        elif type(self) != type(value):
             return False
         else:
             return self._items == value._items
