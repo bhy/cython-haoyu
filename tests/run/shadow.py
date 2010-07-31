@@ -11,14 +11,14 @@ def test_sizeof():
     True
     """
     x = cython.declare(cython.bint)
-    print sizeof(x) == sizeof(cython.bint)
-    print sizeof(cython.char) <= sizeof(cython.short) <= sizeof(cython.int) <= sizeof(cython.long) <= sizeof(cython.longlong)
-    print sizeof(cython.uint) == sizeof(cython.int)
-    print sizeof(cython.p_int) == sizeof(cython.p_double)
+    print(sizeof(x) == sizeof(cython.bint))
+    print(sizeof(cython.char) <= sizeof(cython.short) <= sizeof(cython.int) <= sizeof(cython.long) <= sizeof(cython.longlong))
+    print(sizeof(cython.uint) == sizeof(cython.int))
+    print(sizeof(cython.p_int) == sizeof(cython.p_double))
     if cython.compiled:
-        print sizeof(cython.char) < sizeof(cython.longlong)
+        print(sizeof(cython.char) < sizeof(cython.longlong))
     else:
-        print sizeof(cython.char) == 1
+        print(sizeof(cython.char) == 1)
 
 def test_declare(n):
     """
