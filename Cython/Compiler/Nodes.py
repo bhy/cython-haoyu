@@ -654,6 +654,10 @@ class CArgDeclNode(Node):
 
     def analyse(self, env, nonempty = 0):
         #print "CArgDeclNode.analyse: is_self_arg =", self.is_self_arg ###
+        if env is not None and self.annotation is not None:
+            type = self.annotation.analyse_as_type(env)
+            if type is not None:
+                return self.declarator, type
         if self.type is None:
             # The parser may missinterpret names as types...
             # We fix that here.
@@ -1173,8 +1177,8 @@ class FuncDefNode(StatNode, BlockNode):
 
     def align_argument_type(self, env, arg):
         directive_locals = self.directive_locals
-        type = arg.type
         if arg.name in directive_locals:
+            type = arg.type
             type_node = directive_locals[arg.name]
             other_type = type_node.analyse_as_type(env)
             if other_type is None:
@@ -1998,9 +2002,10 @@ class DefNode(FuncDefNode):
                 type = arg.type
                 name_declarator = None
             else:
-                base_type = arg.base_type.analyse(env)
-                name_declarator, type = \
-                    arg.declarator.analyse(base_type, env)
+                #base_type = arg.base_type.analyse(env)
+                #name_declarator, type = \
+                    #arg.declarator.analyse(base_type, env)
+                name_declarator, type = arg.analyse(env)
                 arg.name = name_declarator.name
             arg.type = type
             self.align_argument_type(env, arg)

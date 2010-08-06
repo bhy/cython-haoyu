@@ -173,6 +173,7 @@ def pointer(basetype):
         _basetype = basetype
     return PointerInstance
 
+#TODO(haoyu) cython.array is not implemented in Cython yet
 def array(basetype, n):
     class ArrayInstance(ArrayType):
         _basetype = basetype
