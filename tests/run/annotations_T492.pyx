@@ -64,3 +64,18 @@ def test_exttype(a: MyExtType):
     a.shout()
     return
 
+@cython.ccall
+def test_dummy(a: "an argument", b: None):
+    """
+    >>> test_dummy(1, 2)
+    (1, 2)
+    """
+    return (a,b)
+
+@cython.ccall
+def test_return(x) -> cython.double:
+    """
+    >>> isinstance(test_return(1), float)
+    True
+    """
+    return x

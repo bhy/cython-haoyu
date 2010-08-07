@@ -715,7 +715,7 @@ class CBaseTypeNode(Node):
     def analyse_as_type(self, env):
         return self.analyse(env)
     
-class CAnalysedBaseTypeNode(Node):
+class CAnalysedBaseTypeNode(CBaseTypeNode):
     # type            type
     
     child_attrs = []
@@ -1601,7 +1601,7 @@ class CFuncDefNode(FuncDefNode):
         
     def analyse_declarations(self, env):
         self.directive_locals.update(env.directives['locals'])
-        base_type = self.base_type.analyse(env)
+        base_type = self.base_type.analyse_as_type(env)
         # The 2 here is because we need both function and argument names. 
         name_declarator, type = self.declarator.analyse(base_type, env, nonempty = 2 * (self.body is not None))
         if not type.is_cfunction:
@@ -1893,6 +1893,7 @@ class DefNode(FuncDefNode):
             error(self.star_arg.pos, "cdef function cannot have star argument")
         if self.starstar_arg:
             error(self.starstar_arg.pos, "cdef function cannot have starstar argument")
+        base_type = None
         if cfunc is None:
             cfunc_args = []
             for formal_arg in self.args:
@@ -1901,6 +1902,7 @@ class DefNode(FuncDefNode):
                                                           cname = None,
                                                           type = py_object_type,
                                                           pos = formal_arg.pos))
+            base_type = self.return_type_annotation
             cfunc_type = PyrexTypes.CFuncType(return_type = py_object_type,
                                               args = cfunc_args,
                                               has_varargs = False,
@@ -1925,6 +1927,8 @@ class DefNode(FuncDefNode):
             exception_value = None
         else:
             exception_value = ExprNodes.ConstNode(self.pos, value=cfunc_type.exception_value, type=cfunc_type.return_type)
+        if base_type is None:
+            base_type = CAnalysedBaseTypeNode(self.pos, type=cfunc_type.return_type)
         declarator = CFuncDeclaratorNode(self.pos, 
                                          base = CNameDeclaratorNode(self.pos, name=self.name, cname=None),
                                          args = self.args,
@@ -1936,7 +1940,7 @@ class DefNode(FuncDefNode):
                                          nogil = cfunc_type.nogil)
         return CFuncDefNode(self.pos, 
                             modifiers = [],
-                            base_type = CAnalysedBaseTypeNode(self.pos, type=cfunc_type.return_type),
+                            base_type = base_type,
                             declarator = declarator,
                             body = self.body,
                             doc = self.doc,
