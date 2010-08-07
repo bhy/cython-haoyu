@@ -911,7 +911,7 @@ class CVarDefNode(StatNode):
     properties = ()
     
     decorators = None
-    directive_locals = {}
+    directive_locals = None
     
     def analyse_declarations(self, env, dest_scope = None):
         if not dest_scope:
@@ -1594,12 +1594,14 @@ class CFuncDefNode(FuncDefNode):
 
     inline_in_pxd = False
     decorators = None
-    directive_locals = {}
+    directive_locals = None
 
     def unqualified_name(self):
         return self.entry.name
         
     def analyse_declarations(self, env):
+        if self.directive_locals is None:
+            self.directive_locals = {}
         self.directive_locals.update(env.directives['locals'])
         base_type = self.base_type.analyse_as_type(env)
         # The 2 here is because we need both function and argument names. 

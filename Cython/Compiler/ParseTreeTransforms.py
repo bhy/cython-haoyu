@@ -590,7 +590,7 @@ class InterpretCompilerDirectives(CythonTransform, SkipDeclarations):
         super(InterpretCompilerDirectives, self).__init__(context)
         self.compilation_directive_defaults = {}
         for key, value in compilation_directive_defaults.iteritems():
-            self.compilation_directive_defaults[unicode(key)] = value
+            self.compilation_directive_defaults[unicode(key)] = copy.deepcopy(value)
         self.cython_module_names = set()
         self.directive_names = {}
 
@@ -610,7 +610,7 @@ class InterpretCompilerDirectives(CythonTransform, SkipDeclarations):
                 self.wrong_scope_error(node.pos, key, 'module')
                 del node.directive_comments[key]
 
-        directives = copy.copy(Options.directive_defaults)
+        directives = copy.deepcopy(Options.directive_defaults)
         directives.update(self.compilation_directive_defaults)
         directives.update(node.directive_comments)
         self.directives = directives
