@@ -5,7 +5,7 @@ cdef func(x):
 
 def test():
     """
-    >>> type(test())
-    <type 'float'>
+    >>> isinstance(test(), float)
+    True
     """
     return func(2)
