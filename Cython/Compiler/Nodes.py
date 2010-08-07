@@ -701,6 +701,21 @@ class CArgDeclNode(Node):
         if self.default:
             self.default.annotate(code)
 
+class AnnotationNode(Node):
+    # expr          ExprNode    The annotation experission
+    child_attrs = ['expr']
+
+    def analyse_as_type(self, env):
+        from ExprNodes import TupleNode
+        expr = self.expr
+        if isinstance(expr, TupleNode):
+            for subexpr in expr.args:
+                r = subexpr.analyse_as_type(env)
+                if r:
+                    return r
+            return None
+        else:
+            return self.expr.analyse_as_type(env)
 
 class CBaseTypeNode(Node):
     # Abstract base class for C base type nodes.

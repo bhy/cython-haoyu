@@ -79,3 +79,13 @@ def test_return(x) -> cython.double:
     True
     """
     return x
+
+@cython.ccall
+def test_tuple(a: (cython.int, "an argument"), b:("another argument", cython.double, None)) -> (cython.int, "return value"):
+    """
+    >>> test_tuple(1, 2)
+    3
+    >>> test_tuple(2, 3.0)
+    5
+    """
+    return a+b

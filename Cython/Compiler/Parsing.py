@@ -2593,7 +2593,7 @@ def p_def_statement(s, decorators=None):
     return_type_annotation = None
     if s.sy == '->':
         s.next()
-        return_type_annotation = p_test(s)
+        return_type_annotation = Nodes.AnnotationNode(pos, expr = p_test(s))
     doc, body = p_suite(s, Ctx(level = 'function'), with_doc = 1)
     return Nodes.DefNode(pos, name = name, args = args, 
         star_arg = star_arg, starstar_arg = starstar_arg,
@@ -2626,7 +2626,7 @@ def p_py_arg_decl(s):
     annotation = None
     if s.sy == ':':
         s.next()
-        annotation = p_test(s)
+        annotation = Node.AnnotationNode(pos, expr = p_test(s))
     return Nodes.PyArgDeclNode(pos, name = name, annotation = annotation)
 
 def p_class_statement(s, decorators):
