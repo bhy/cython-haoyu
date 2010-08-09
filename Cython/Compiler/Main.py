@@ -145,22 +145,20 @@ class Context(object):
             CreateClosureClasses(self),
             AutoTestDictTransform(self),
             EmbedSignature(self),
-            EarlyReplaceBuiltinCalls(self),
+            EarlyReplaceBuiltinCalls(self),  ## Necessary?
             MarkAssignments(self),
             MarkOverflowingArithmetic(self),
-            TransformBuiltinMethods(self),
+            TransformBuiltinMethods(self),  ## Necessary?
             IntroduceBufferAuxiliaryVars(self),
             _check_c_declarations,
             AnalyseExpressionsTransform(self),
-            OptimizeBuiltinCalls(self),
+            OptimizeBuiltinCalls(self),  ## Necessary?
             IterationTransform(),
             SwitchTransform(),
             DropRefcountingTransform(),
             FinalOptimizePhase(self),
             GilCheck(),
             #ClearResultCodes(self),
-            #SpecialFunctions(self),
-            #CreateClosureClasses(context),
             ]
 
     def create_pyx_pipeline(self, options, result, py=False):
