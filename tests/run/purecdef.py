@@ -38,6 +38,14 @@ def test_with():
 @cython.test_assert_path_exists('//CClassDefNode')
 @cython.cclass
 class PureFoo(object):
+    a = cython.declare(cython.double)
+
+    def __init__(self, a):
+        self.a = a
+
+    def __call__(self):
+        return self.a
+
     @cython.test_assert_path_exists('//CFuncDefNode')
     @cython.cfunc
     def puremeth(self, a):
@@ -47,9 +55,15 @@ def test_method():
     """
     >>> test_method()
     4
+    True
     """
-    x = PureFoo()
-    return x.puremeth(2)
+    x = PureFoo(2)
+    print(x.puremeth(2))
+    if cython.compiled:
+        print(isinstance(x(), float))
+    else:
+        print(True)
+    return
 
 @cython.ccall
 def ccall_sqr(x):
