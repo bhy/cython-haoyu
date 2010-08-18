@@ -2580,7 +2580,7 @@ def p_py_arg_decl(s):
     annotation = None
     if s.sy == ':':
         s.next()
-        annotation = Node.AnnotationNode(pos, expr = p_test(s))
+        annotation = Nodes.AnnotationNode(pos, expr = p_test(s))
     return Nodes.PyArgDeclNode(pos, name = name, annotation = annotation)
 
 def p_class_statement(s, decorators):
