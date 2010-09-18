@@ -4427,7 +4427,7 @@ class ClassNode(ExprNode):
     #  bases        ExprNode           Base class tuple
     #  dict         ExprNode           Class dict (not owned by this node)
     #  doc          ExprNode or None   Doc string
-    #  module_name  string             Name of defining module
+    #  module_name  EncodedString      Name of defining module
     
     subexprs = ['bases', 'doc']
 
@@ -4436,7 +4436,7 @@ class ClassNode(ExprNode):
         if self.doc:
             self.doc.analyse_types(env)
             self.doc = self.doc.coerce_to_pyobject(env)
-        self.module_name = env.global_scope().module_name
+        self.module_name = env.global_scope().qualified_name
         self.type = py_object_type
         self.is_temp = 1
         env.use_utility_code(create_class_utility_code);
@@ -4528,10 +4528,10 @@ class PyCFunctionNode(ExprNode):
     #  class definitions. Constructs a PyCFunction object
     #  from a PyMethodDef struct.
     #
-    #  pymethdef_cname   string   PyMethodDef structure
+    #  pymethdef_cname   string             PyMethodDef structure
     #  self_object       ExprNode or None
     #  binding           bool
-    #  module_name       str
+    #  module_name       EncodedString      Name of defining module
 
     subexprs = []
     self_object = None
@@ -4543,7 +4543,7 @@ class PyCFunctionNode(ExprNode):
     def analyse_types(self, env):
         if self.binding:
             env.use_utility_code(binding_cfunc_utility_code)
-        self.module_name = env.global_scope().module_name
+        self.module_name = env.global_scope().qualified_name
 
     def may_be_none(self):
         return False
