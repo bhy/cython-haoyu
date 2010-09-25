@@ -4453,7 +4453,7 @@ class ClassNode(ExprNode):
                 'PyDict_SetItemString(%s, "__doc__", %s)' % (
                     self.dict.py_result(),
                     self.doc.py_result()))
-        py_mod_name = code.globalstate.get_py_string_const(
+        py_mod_name = code.get_py_string_const(
                  self.module_name, identifier=True)
         code.putln(
             '%s = __Pyx_CreateClass(%s, %s, %s, %s); %s' % (
@@ -4562,7 +4562,7 @@ class PyCFunctionNode(ExprNode):
             constructor = "%s_NewEx" % Naming.binding_cfunc
         else:
             constructor = "PyCFunction_NewEx"
-        py_mod_name = code.globalstate.get_py_string_const(
+        py_mod_name = code.get_py_string_const(
                  self.module_name, identifier=True)
         code.putln(
             '%s = %s(&%s, %s, %s); %s' % (
