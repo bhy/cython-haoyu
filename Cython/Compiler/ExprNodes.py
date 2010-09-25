@@ -4436,6 +4436,7 @@ class ClassNode(ExprNode):
         if self.doc:
             self.doc.analyse_types(env)
             self.doc = self.doc.coerce_to_pyobject(env)
+        #TODO(craig,haoyu) This should be moved to a better place
         self.module_name = env.global_scope().qualified_name
         self.type = py_object_type
         self.is_temp = 1
@@ -4543,6 +4544,7 @@ class PyCFunctionNode(ExprNode):
     def analyse_types(self, env):
         if self.binding:
             env.use_utility_code(binding_cfunc_utility_code)
+        #TODO(craig,haoyu) This should be moved to a better place
         self.module_name = env.global_scope().qualified_name
 
     def may_be_none(self):
