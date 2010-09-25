@@ -4417,8 +4417,15 @@ class DictItemNode(ExprNode):
     def __iter__(self):
         return iter([self.key, self.value])
 
+class ModuleNameMixin(object):
+    def set_mod_name(self, env):
+        self.module_name = env.global_scope().qualified_name
 
-class ClassNode(ExprNode):
+    def get_py_mod_name(self, code):
+        return code.get_py_string_const(
+                 self.module_name, identifier=True)
+
+class ClassNode(ExprNode, ModuleNameMixin):
     #  Helper class used in the implementation of Python
     #  class definitions. Constructs a class object given
     #  a name, tuple of bases and class dictionary.
@@ -4436,11 +4443,11 @@ class ClassNode(ExprNode):
         if self.doc:
             self.doc.analyse_types(env)
             self.doc = self.doc.coerce_to_pyobject(env)
-        #TODO(craig,haoyu) This should be moved to a better place
-        self.module_name = env.global_scope().qualified_name
         self.type = py_object_type
         self.is_temp = 1
         env.use_utility_code(create_class_utility_code);
+        #TODO(craig,haoyu) This should be moved to a better place
+        self.set_mod_name(env)
 
     def may_be_none(self):
         return False
@@ -4454,15 +4461,14 @@ class ClassNode(ExprNode):
                 'PyDict_SetItemString(%s, "__doc__", %s)' % (
                     self.dict.py_result(),
                     self.doc.py_result()))
-        py_mod_name = code.get_py_string_const(
-                 self.module_name, identifier=True)
+        py_mod_name = self.get_py_mod_name(code)
         code.putln(
             '%s = __Pyx_CreateClass(%s, %s, %s, %s); %s' % (
                 self.result(),
                 self.bases.py_result(),
                 self.dict.py_result(),
                 cname,
-                py_mod_name.cname,
+                py_mod_name,
                 code.error_goto_if_null(self.result(), self.pos)))
         code.put_gotref(self.py_result())
 
@@ -4524,7 +4530,7 @@ class UnboundMethodNode(ExprNode):
         code.put_gotref(self.py_result())
 
 
-class PyCFunctionNode(ExprNode):
+class PyCFunctionNode(ExprNode, ModuleNameMixin):
     #  Helper class used in the implementation of Python
     #  class definitions. Constructs a PyCFunction object
     #  from a PyMethodDef struct.
@@ -4544,8 +4550,9 @@ class PyCFunctionNode(ExprNode):
     def analyse_types(self, env):
         if self.binding:
             env.use_utility_code(binding_cfunc_utility_code)
+
         #TODO(craig,haoyu) This should be moved to a better place
-        self.module_name = env.global_scope().qualified_name
+        self.set_mod_name(env)
 
     def may_be_none(self):
         return False
@@ -4564,15 +4571,14 @@ class PyCFunctionNode(ExprNode):
             constructor = "%s_NewEx" % Naming.binding_cfunc
         else:
             constructor = "PyCFunction_NewEx"
-        py_mod_name = code.get_py_string_const(
-                 self.module_name, identifier=True)
+        py_mod_name = self.get_py_mod_name(code)
         code.putln(
             '%s = %s(&%s, %s, %s); %s' % (
                 self.result(),
                 constructor,
                 self.pymethdef_cname,
                 self.self_result_code(),
-                py_mod_name.cname,
+                py_mod_name,
                 code.error_goto_if_null(self.result(), self.pos)))
         code.put_gotref(self.py_result())
 
